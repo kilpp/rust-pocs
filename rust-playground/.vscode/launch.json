@@ -1,0 +1,25 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug rust-playground",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=rust-playground",
+                    "--package=rust-playground"
+                ],
+                "filter": {
+                    "name": "rust-playground",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "sourceLanguages": ["rust"]
+        }
+    ]
+}

@@ -5,15 +5,14 @@ use crossterm::{
 };
 use ratatui::{
     backend::{Backend, CrosstermBackend},
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
-    Frame, Terminal,
+    Terminal,
 };
 use std::io;
 
-struct App {
+mod ui;
+use ui::UIRenderer;
+
+pub struct App {
     selected_item: usize,
     items: Vec<String>,
 }
@@ -78,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
     loop {
-        terminal.draw(|f| ui(f, &app))?;
+        terminal.draw(|f| UIRenderer::render(f, &app))?;
 
         if crossterm::event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
@@ -97,76 +96,4 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
             }
         }
     }
-}
-
-fn ui(f: &mut Frame, app: &App) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .margin(1)
-        .constraints(
-            [
-                Constraint::Percentage(25), // Left panel
-                Constraint::Percentage(75), // Central panel
-            ]
-            .as_ref(),
-        )
-        .split(f.area());
-
-    // Left Panel - Menu/Navigation
-    let left_panel = Block::default()
-        .title(" Menu ")
-        .borders(Borders::ALL)
-        .style(Style::default().fg(Color::Cyan));
-
-    let menu_items: Vec<Line> = app
-        .items
-        .iter()
-        .enumerate()
-        .map(|(idx, item)| {
-            if idx == app.selected_item {
-                Line::from(vec![Span::styled(
-                    format!("► {}", item),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )])
-            } else {
-                Line::from(vec![Span::raw(format!("  {}", item))])
-            }
-        })
-        .collect();
-
-    let left_content = Paragraph::new(menu_items)
-        .block(left_panel)
-        .style(Style::default().fg(Color::White));
-
-    f.render_widget(left_content, chunks[0]);
-
-    // Central Panel - Main Content
-    let central_panel = Block::default()
-        .title(" Content ")
-        .borders(Borders::ALL)
-        .style(Style::default().fg(Color::Cyan));
-
-    let selected_item = &app.items[app.selected_item];
-    let content = vec![
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            format!("Selected: {}", selected_item),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(""),
-        Line::from("Use ↑/↓ (or j/k) to navigate"),
-        Line::from("Press 'q' or ESC to quit"),
-        Line::from(""),
-        Line::from("This is the main content area!"),
-    ];
-
-    let central_content = Paragraph::new(content)
-        .block(central_panel)
-        .style(Style::default().fg(Color::White));
-
-    f.render_widget(central_content, chunks[1]);
 }

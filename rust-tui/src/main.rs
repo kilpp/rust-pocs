@@ -7,6 +7,7 @@ use ratatui::{
     backend::{Backend, CrosstermBackend},
     Terminal,
 };
+use sysinfo::System;
 use std::io;
 
 mod ui;
@@ -15,6 +16,8 @@ use ui::UIRenderer;
 pub struct App {
     selected_item: usize,
     items: Vec<String>,
+    cpu_history: Vec<u64>,
+    mem_history: Vec<u64>,
 }
 
 impl App {
@@ -27,6 +30,8 @@ impl App {
                 "Item 3".to_string(),
                 "Item 4".to_string(),
             ],
+            cpu_history: Vec::new(),
+            mem_history: Vec::new(),
         }
     }
 
@@ -76,10 +81,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
+    let mut sys = System::new_all();
+    const HISTORY_LEN: usize = 100;
+
     loop {
+        // Refresh system metrics
+        sys.refresh_cpu();
+        sys.refresh_memory();
+
+        // CPU usage (percentage)
+        let cpu_usage = sys.global_cpu_info().cpu_usage();
+        let cpu_pct = cpu_usage.round() as u64;
+        app.cpu_history.push(cpu_pct);
+        if app.cpu_history.len() > HISTORY_LEN {
+            app.cpu_history.remove(0);
+        }
+
+        // Memory usage (percentage)
+        let total_mem = sys.total_memory() as f64;
+        let used_mem = sys.used_memory() as f64;
+        let mem_pct = if total_mem > 0.0 { ((used_mem / total_mem) * 100.0).round() as u64 } else { 0 };
+        app.mem_history.push(mem_pct);
+        if app.mem_history.len() > HISTORY_LEN {
+            app.mem_history.remove(0);
+        }
+
+        // (Disk tracking removed for now)
+
+        // Draw UI
         terminal.draw(|f| UIRenderer::render(f, &app))?;
 
-        if crossterm::event::poll(std::time::Duration::from_millis(100))? {
+        // Handle input events
+        if crossterm::event::poll(std::time::Duration::from_millis(500))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => {

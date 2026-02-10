@@ -97,15 +97,15 @@ impl UIRenderer {
         }
     }
 
-    fn render_cpu_view(f: &mut Frame, app: &App, area: Rect, panel_block: Block) {
-        // CPU detailed: big sparkline + gauge + current value
+    fn render_cpu_view(f: &mut Frame, app: &App, area: Rect, _panel_block: Block) {
+        // CPU detailed: big sparkline + gauge + per-core list
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(0)
             .constraints([
                 Constraint::Length(6),
                 Constraint::Length(3),
-                Constraint::Min(0),
+                Constraint::Min(1),
             ])
             .split(area);
 
@@ -124,20 +124,31 @@ impl UIRenderer {
             .label(format!("{}%", app.cpu_history.last().cloned().unwrap_or(0)));
         f.render_widget(gauge, chunks[1]);
 
-        let info = Paragraph::new(vec![
-            Line::from(format!("Current CPU: {}%", app.cpu_history.last().cloned().unwrap_or(0))),
-            Line::from("Per-core details not shown."),
-        ])
-        .block(panel_block);
+        // Per-core CPU usage
+        let core_lines: Vec<Line> = app
+            .cpu_cores
+            .iter()
+            .enumerate()
+            .map(|(idx, usage)| {
+                Line::from(format!("  Core {}: {:.1}%", idx, usage))
+            })
+            .collect();
+
+        let info = Paragraph::new(core_lines)
+            .block(Block::default().title("Per-Core Usage").borders(Borders::ALL));
         f.render_widget(info, chunks[2]);
     }
 
-    fn render_mem_view(f: &mut Frame, app: &App, area: Rect, panel_block: Block) {
-        // Memory detailed: sparkline + gauge + usage text
+    fn render_mem_view(f: &mut Frame, app: &App, area: Rect, _panel_block: Block) {
+        // Memory detailed: sparkline + gauge + breakdown
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(0)
-            .constraints([Constraint::Length(6), Constraint::Length(3), Constraint::Min(0)])
+            .constraints([
+                Constraint::Length(6),
+                Constraint::Length(3),
+                Constraint::Min(1),
+            ])
             .split(area);
 
         let mem_data: Vec<u64> = app.mem_history.clone();
@@ -155,20 +166,28 @@ impl UIRenderer {
             .label(format!("{}%", app.mem_history.last().cloned().unwrap_or(0)));
         f.render_widget(gauge, chunks[1]);
 
+        // Memory breakdown
         let info = Paragraph::new(vec![
-            Line::from(format!("Current Memory: {}%", app.mem_history.last().cloned().unwrap_or(0))),
-            Line::from("Total/available details are not shown."),
+            Line::from(format!("Total: {}", Self::format_bytes(app.mem_total))),
+            Line::from(format!("Used:  {}", Self::format_bytes(app.mem_used))),
+            Line::from(format!("Avail: {}", Self::format_bytes(app.mem_available))),
+            Line::from(format!("Swap Total: {}", Self::format_bytes(app.mem_swap_total))),
+            Line::from(format!("Swap Used : {}", Self::format_bytes(app.mem_swap_used))),
         ])
-        .block(panel_block);
+        .block(Block::default().title("Breakdown").borders(Borders::ALL));
         f.render_widget(info, chunks[2]);
     }
 
-    fn render_disk_view(f: &mut Frame, app: &App, area: Rect, panel_block: Block) {
-        // Disk detailed: sparkline + gauge + available bytes
+    fn render_disk_view(f: &mut Frame, app: &App, area: Rect, _panel_block: Block) {
+        // Disk detailed: sparkline + gauge + per-disk list
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(0)
-            .constraints([Constraint::Length(6), Constraint::Length(3), Constraint::Min(0)])
+            .constraints([
+                Constraint::Length(6),
+                Constraint::Length(3),
+                Constraint::Min(1),
+            ])
             .split(area);
 
         let disk_data: Vec<u64> = app.disk_history.clone();
@@ -186,11 +205,29 @@ impl UIRenderer {
             .label(format!("{}%", app.disk_history.last().cloned().unwrap_or(0)));
         f.render_widget(gauge, chunks[1]);
 
-        let info = Paragraph::new(vec![
-            Line::from(format!("Available: {}", Self::format_bytes(app.disk_available))),
-            Line::from("Aggregated across mounts."),
-        ])
-        .block(panel_block);
+        // Per-disk listing
+        let disk_lines: Vec<Line> = app
+            .disks_info
+            .iter()
+            .map(|(mount, total, avail)| {
+                let used = total.saturating_sub(*avail);
+                let pct = if *total > 0 {
+                    ((used as f64 / *total as f64) * 100.0) as u64
+                } else {
+                    0
+                };
+                Line::from(format!(
+                    "{}  {}/{} ({}%)",
+                    mount,
+                    Self::format_bytes(used),
+                    Self::format_bytes(*total),
+                    pct
+                ))
+            })
+            .collect();
+
+        let info = Paragraph::new(disk_lines)
+            .block(Block::default().title("Disk Mounts").borders(Borders::ALL));
         f.render_widget(info, chunks[2]);
     }
 

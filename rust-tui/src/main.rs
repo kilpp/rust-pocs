@@ -27,10 +27,9 @@ impl App {
         App {
             selected_item: 0,
             items: vec![
-                "Item 1".to_string(),
-                "Item 2".to_string(),
-                "Item 3".to_string(),
-                "Item 4".to_string(),
+                "CPU".to_string(),
+                "Memory".to_string(),
+                "Disk".to_string(),
             ],
             cpu_history: Vec::new(),
             mem_history: Vec::new(),

@@ -7,7 +7,7 @@ use ratatui::{
     backend::{Backend, CrosstermBackend},
     Terminal,
 };
-use sysinfo::System;
+use sysinfo::{Disks, System};
 use std::io;
 
 mod ui;
@@ -18,6 +18,8 @@ pub struct App {
     items: Vec<String>,
     cpu_history: Vec<u64>,
     mem_history: Vec<u64>,
+    disk_history: Vec<u64>,
+    disk_available: u64,
 }
 
 impl App {
@@ -32,6 +34,8 @@ impl App {
             ],
             cpu_history: Vec::new(),
             mem_history: Vec::new(),
+            disk_history: Vec::new(),
+            disk_available: 0,
         }
     }
 
@@ -82,6 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
     let mut sys = System::new_all();
+    let mut disks = Disks::new_with_refreshed_list();
     const HISTORY_LEN: usize = 100;
 
     loop {
@@ -106,7 +111,25 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
             app.mem_history.remove(0);
         }
 
-        // (Disk tracking removed for now)
+        // Disk usage: refresh disks and compute aggregate usage/available
+        disks.refresh();
+        let mut total_disk: u64 = 0;
+        let mut avail_disk: u64 = 0;
+        for d in disks.list() {
+            total_disk = total_disk.saturating_add(d.total_space());
+            avail_disk = avail_disk.saturating_add(d.available_space());
+        }
+        let used_disk = total_disk.saturating_sub(avail_disk);
+        let disk_pct = if total_disk > 0 {
+            ((used_disk as f64 / total_disk as f64) * 100.0).round() as u64
+        } else {
+            0
+        };
+        app.disk_history.push(disk_pct);
+        if app.disk_history.len() > HISTORY_LEN {
+            app.disk_history.remove(0);
+        }
+        app.disk_available = avail_disk;
 
         // Draw UI
         terminal.draw(|f| UIRenderer::render(f, &app))?;

@@ -20,6 +20,13 @@ pub struct App {
     mem_history: Vec<u64>,
     disk_history: Vec<u64>,
     disk_available: u64,
+    cpu_cores: Vec<f32>,
+    mem_total: u64,
+    mem_used: u64,
+    mem_available: u64,
+    mem_swap_total: u64,
+    mem_swap_used: u64,
+    disks_info: Vec<(String, u64, u64)>, // (mount_point, total, available)
 }
 
 impl App {
@@ -35,6 +42,13 @@ impl App {
             mem_history: Vec::new(),
             disk_history: Vec::new(),
             disk_available: 0,
+            cpu_cores: Vec::new(),
+            mem_total: 0,
+            mem_used: 0,
+            mem_available: 0,
+            mem_swap_total: 0,
+            mem_swap_used: 0,
+            disks_info: Vec::new(),
         }
     }
 
@@ -110,13 +124,26 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
             app.mem_history.remove(0);
         }
 
+        // Per-core CPU usage
+        app.cpu_cores = sys.cpus().iter().map(|c| c.cpu_usage()).collect();
+
+        // Memory breakdown
+        app.mem_total = sys.total_memory();
+        app.mem_used = sys.used_memory();
+        app.mem_available = sys.available_memory();
+        app.mem_swap_total = sys.total_swap();
+        app.mem_swap_used = sys.used_swap();
+
         // Disk usage: refresh disks and compute aggregate usage/available
         disks.refresh();
         let mut total_disk: u64 = 0;
         let mut avail_disk: u64 = 0;
+        app.disks_info.clear();
         for d in disks.list() {
             total_disk = total_disk.saturating_add(d.total_space());
             avail_disk = avail_disk.saturating_add(d.available_space());
+            let mount = d.mount_point().to_string_lossy().to_string();
+            app.disks_info.push((mount, d.total_space(), d.available_space()));
         }
         let used_disk = total_disk.saturating_sub(avail_disk);
         let disk_pct = if total_disk > 0 {

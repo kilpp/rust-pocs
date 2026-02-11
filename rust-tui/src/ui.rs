@@ -49,6 +49,13 @@ impl UIRenderer {
 
         let disk = app.disk_history.last().cloned().unwrap_or(0);
 
+        // Determine network summary (pick first active interface if any)
+        let net_summary = if let Some((_name, rx, tx, kind)) = app.networks_info.first() {
+            format!("{}: {} / {}", kind, Self::format_bytes(*rx), Self::format_bytes(*tx))
+        } else {
+            "No network".to_string()
+        };
+
         let lines = vec![
             Line::from(vec![Span::styled(
                 format!("CPU: {}%", cpu),
@@ -74,6 +81,14 @@ impl UIRenderer {
                     Style::default().fg(Color::White)
                 },
             )]),
+            Line::from(vec![Span::styled(
+                format!("Network: {}", net_summary),
+                if app.selected_item == 3 {
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                },
+            )]),
         ];
 
         let content = Paragraph::new(lines).block(panel_block);
@@ -90,6 +105,7 @@ impl UIRenderer {
             0 => Self::render_cpu_view(f, app, area, panel_block),
             1 => Self::render_mem_view(f, app, area, panel_block),
             2 => Self::render_disk_view(f, app, area, panel_block),
+            3 => Self::render_network_view(f, app, area, panel_block),
             _ => {
                 let empty = Paragraph::new("No resource selected").block(panel_block);
                 f.render_widget(empty, area);
@@ -229,6 +245,43 @@ impl UIRenderer {
         let info = Paragraph::new(disk_lines)
             .block(Block::default().title("Disk Mounts").borders(Borders::ALL));
         f.render_widget(info, chunks[2]);
+    }
+
+    fn render_network_view(f: &mut Frame, app: &App, area: Rect, _panel_block: Block) {
+        // Network detailed: per-interface speeds and simple animated indicator
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .margin(0)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(0),
+            ])
+            .split(area);
+
+        // Header with animated spinner
+        let spinner = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
+        let s = spinner[app.tick % spinner.len()];
+        let header = Paragraph::new(vec![Line::from(format!("Network Interfaces {}", s))])
+            .block(Block::default().borders(Borders::ALL).title("Network"));
+        f.render_widget(header, chunks[0]);
+
+        // Interface list: name, type, rx/s, tx/s
+        let lines: Vec<Line> = app
+            .networks_info
+            .iter()
+            .map(|(name, rx, tx, kind)| {
+                Line::from(format!(
+                    "{} ({})  ↓ {}  ↑ {}",
+                    name,
+                    kind,
+                    Self::format_bytes(*rx),
+                    Self::format_bytes(*tx)
+                ))
+            })
+            .collect();
+
+        let list = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Interfaces"));
+        f.render_widget(list, chunks[1]);
     }
 
     fn format_bytes(bytes: u64) -> String {

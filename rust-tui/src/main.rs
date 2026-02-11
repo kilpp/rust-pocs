@@ -7,7 +7,7 @@ use ratatui::{
     backend::{Backend, CrosstermBackend},
     Terminal,
 };
-use sysinfo::{Disks, System};
+use sysinfo::{Disks, Networks, System};
 use std::io;
 
 mod ui;
@@ -27,6 +27,8 @@ pub struct App {
     mem_swap_total: u64,
     mem_swap_used: u64,
     disks_info: Vec<(String, u64, u64)>, // (mount_point, total, available)
+    networks_info: Vec<(String, u64, u64, String)>, // (name, rx_bps, tx_bps, kind)
+    tick: usize,
 }
 
 impl App {
@@ -37,6 +39,7 @@ impl App {
                 "CPU".to_string(),
                 "Memory".to_string(),
                 "Disk".to_string(),
+                "Network".to_string(),
             ],
             cpu_history: Vec::new(),
             mem_history: Vec::new(),
@@ -49,6 +52,8 @@ impl App {
             mem_swap_total: 0,
             mem_swap_used: 0,
             disks_info: Vec::new(),
+            networks_info: Vec::new(),
+            tick: 0,
         }
     }
 
@@ -100,6 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
     let mut sys = System::new_all();
     let mut disks = Disks::new_with_refreshed_list();
+    let mut networks = Networks::new_with_refreshed_list();
     const HISTORY_LEN: usize = 100;
 
     loop {
@@ -156,6 +162,59 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
             app.disk_history.remove(0);
         }
         app.disk_available = avail_disk;
+
+        // Networks: refresh and compute approximate speeds (bytes/sec)
+        networks.refresh();
+        app.networks_info.clear();
+        for (name, net) in networks.list() {
+            // net.received()/transmitted() give bytes since last refresh; our loop polls ~500ms
+            let rx = net.received();
+            let tx = net.transmitted();
+            // convert to bytes/sec assuming ~500ms interval
+            let rx_bps = rx.saturating_mul(2);
+            let tx_bps = tx.saturating_mul(2);
+            let kind = {
+                // Prefer checking sysfs on Linux to detect wireless interfaces reliably
+                #[cfg(target_os = "linux")]
+                {
+                    use std::path::Path;
+                    let wireless_path = format!("/sys/class/net/{}/wireless", name);
+                    if Path::new(&wireless_path).exists() {
+                        "Wi-Fi".to_string()
+                    } else {
+                        // If the device directory exists it's likely a physical interface (Ethernet)
+                        let device_path = format!("/sys/class/net/{}/device", name);
+                        if Path::new(&device_path).exists() {
+                            "Ethernet".to_string()
+                        } else {
+                            // Fallback to name heuristics
+                            if name.contains("wl") || name.to_lowercase().contains("wifi") || name.to_lowercase().contains("wlan") {
+                                "Wi-Fi".to_string()
+                            } else if name.contains("en") || name.to_lowercase().contains("eth") || name.to_lowercase().contains("enp") {
+                                "Ethernet".to_string()
+                            } else {
+                                "Unknown".to_string()
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    // Non-Linux fallback heuristics
+                    if name.contains("wl") || name.to_lowercase().contains("wifi") || name.to_lowercase().contains("wlan") {
+                        "Wi-Fi".to_string()
+                    } else if name.contains("en") || name.to_lowercase().contains("eth") || name.to_lowercase().contains("enp") {
+                        "Ethernet".to_string()
+                    } else {
+                        "Unknown".to_string()
+                    }
+                }
+            };
+            app.networks_info.push((name.clone(), rx_bps, tx_bps, kind));
+        }
+
+        // Animation tick for simple indicator
+        app.tick = app.tick.wrapping_add(1);
 
         // Draw UI
         terminal.draw(|f| UIRenderer::render(f, &app))?;

@@ -9,6 +9,7 @@ use ratatui::{
 };
 use sysinfo::{Disks, Networks, System};
 use std::io;
+use std::fs;
 
 mod ui;
 use ui::UIRenderer;
@@ -166,7 +167,32 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
         // Networks: refresh and compute approximate speeds (bytes/sec)
         networks.refresh();
         app.networks_info.clear();
+
+        // Attempt to detect default interface (the one used for the default route)
+        fn find_default_interface() -> Option<String> {
+            if let Ok(content) = fs::read_to_string("/proc/net/route") {
+                for line in content.lines().skip(1) {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        let iface = parts[0];
+                        let dest = parts[1];
+                        if dest == "00000000" {
+                            return Some(iface.to_string());
+                        }
+                    }
+                }
+            }
+            None
+        }
+
+        let default_iface = find_default_interface();
+
         for (name, net) in networks.list() {
+            // Skip loopback interface
+            if name == "lo" {
+                continue;
+            }
+
             // net.received()/transmitted() give bytes since last refresh; our loop polls ~500ms
             let rx = net.received();
             let tx = net.transmitted();
@@ -211,6 +237,16 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                 }
             };
             app.networks_info.push((name.clone(), rx_bps, tx_bps, kind));
+        }
+
+        // If we detected a default interface, move it to the front so the left panel shows it
+        if let Some(def) = default_iface {
+            if let Some(pos) = app.networks_info.iter().position(|(n, _rx, _tx, _k)| n == &def) {
+                if pos > 0 {
+                    let entry = app.networks_info.remove(pos);
+                    app.networks_info.insert(0, entry);
+                }
+            }
         }
 
         // Animation tick for simple indicator

@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rust WASM Markdown Previewer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                         "Helvetica Neue", Arial, sans-serif;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            background: #2b2d42;
+            color: #edf2f4;
+            padding: 12px 24px;
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        .container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        .pane {
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        #editor {
+            width: 100%;
+            height: 100%;
+            border: none;
+            outline: none;
+            resize: none;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+            font-size: 14px;
+            line-height: 1.6;
+            padding: 16px;
+            background: #f8f9fa;
+        }
+
+        .divider {
+            width: 2px;
+            background: #dee2e6;
+        }
+
+        #preview {
+            font-size: 15px;
+            line-height: 1.7;
+            padding: 16px 24px;
+        }
+
+        #preview h1, #preview h2, #preview h3,
+        #preview h4, #preview h5, #preview h6 {
+            margin-top: 1em;
+            margin-bottom: 0.5em;
+        }
+        #preview h1 { font-size: 2em; border-bottom: 1px solid #dee2e6; padding-bottom: 0.3em; }
+        #preview h2 { font-size: 1.5em; border-bottom: 1px solid #dee2e6; padding-bottom: 0.3em; }
+        #preview h3 { font-size: 1.25em; }
+        #preview p { margin-bottom: 1em; }
+        #preview code {
+            background: #f0f0f0;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }
+        #preview pre {
+            background: #f6f8fa;
+            padding: 16px;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin-bottom: 1em;
+        }
+        #preview pre code {
+            background: none;
+            padding: 0;
+        }
+        #preview blockquote {
+            border-left: 4px solid #dee2e6;
+            padding-left: 16px;
+            color: #6c757d;
+            margin-bottom: 1em;
+        }
+        #preview table {
+            border-collapse: collapse;
+            margin-bottom: 1em;
+        }
+        #preview th, #preview td {
+            border: 1px solid #dee2e6;
+            padding: 8px 12px;
+        }
+        #preview th { background: #f8f9fa; }
+        #preview img { max-width: 100%; }
+        #preview ul, #preview ol { padding-left: 2em; margin-bottom: 1em; }
+        #preview hr { border: none; border-top: 1px solid #dee2e6; margin: 1.5em 0; }
+        #preview a { color: #0969da; }
+
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: #6c757d;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <header>Rust WASM Markdown Previewer</header>
+    <div class="container">
+        <div class="pane">
+            <textarea id="editor" placeholder="Type your markdown here..."></textarea>
+        </div>
+        <div class="divider"></div>
+        <div class="pane" id="preview">
+            <div class="loading">Loading WASM module...</div>
+        </div>
+    </div>
+
+    <script type="module">
+        import init, { render_markdown } from './pkg/rust_wasm.js';
+
+        async function run() {
+            await init();
+
+            const editor = document.getElementById('editor');
+            const preview = document.getElementById('preview');
+
+            const sample = `# Hello, Rust WASM!
+
+This markdown is rendered **in real time** by Rust compiled to WebAssembly.
+
+## Features
+
+- **Bold** and *italic* text
+- ~~Strikethrough~~ support
+- [Links](https://www.rust-lang.org/)
+- Inline \`code\` spans
+
+### Code Block
+
+\`\`\`rust
+fn main() {
+    println!("Hello from Rust!");
+}
+\`\`\`
+
+### Table
+
+| Language | Use Case |
+|----------|----------|
+| Rust     | Systems  |
+| WASM     | Browser  |
+
+### Task List
+
+- [x] Set up wasm-pack
+- [x] Write Rust markdown parser
+- [ ] Take over the world
+
+> Blockquotes work too!
+
+---
+
+*Powered by pulldown-cmark + wasm-bindgen*
+`;
+
+            function update() {
+                const html = render_markdown(editor.value);
+                preview.innerHTML = html;
+            }
+
+            editor.value = sample;
+            update();
+
+            editor.addEventListener('input', update);
+        }
+
+        run();
+    </script>
+</body>
+</html>

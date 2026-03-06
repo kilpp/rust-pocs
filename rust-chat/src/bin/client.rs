@@ -14,7 +14,6 @@ async fn main() {
         Ok(s) => s,
         Err(e) => {
             eprintln!("\x1b[1;31mFailed to connect: {}\x1b[0m", e);
-            eprintln!("Make sure the server is running: cargo run --bin server");
             return;
         }
     };

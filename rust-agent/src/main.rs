@@ -3,6 +3,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{self, Write};
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const MODEL: &str = "claude-sonnet-4-20250514";
@@ -76,6 +78,57 @@ fn tool_definitions() -> Vec<Value> {
                 "required": ["city"]
             }
         }),
+        json!({
+            "name": "current_time",
+            "description": "Get the current date and time in UTC.",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }),
+        json!({
+            "name": "read_file",
+            "description": "Read the contents of a file from the local filesystem.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute or relative path to the file to read"
+                    }
+                },
+                "required": ["path"]
+            }
+        }),
+        json!({
+            "name": "list_dir",
+            "description": "List files and directories at a given path.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Directory path to list, e.g. '.' or '/home/user/project'"
+                    }
+                },
+                "required": ["path"]
+            }
+        }),
+        json!({
+            "name": "run_shell",
+            "description": "Run a shell command and return its stdout and stderr.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to execute, e.g. 'cargo build' or 'ls -la'"
+                    }
+                },
+                "required": ["command"]
+            }
+        }),
     ]
 }
 
@@ -99,8 +152,94 @@ fn execute_tool(name: &str, input: &Value) -> String {
             let cond = conditions[(hash as usize) % conditions.len()];
             format!("{city}: {temp}°C, {cond}")
         }
+        "current_time" => {
+            let secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            // Manual UTC conversion (no external crate needed)
+            let s = secs % 60;
+            let m = (secs / 60) % 60;
+            let h = (secs / 3600) % 24;
+            let days = secs / 86400; // days since 1970-01-01
+            let (year, month, day) = days_to_ymd(days);
+            format!("{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} UTC", h, m, s)
+        }
+        "read_file" => {
+            let path = input["path"].as_str().unwrap_or("");
+            match std::fs::read_to_string(path) {
+                Ok(contents) => contents,
+                Err(e) => format!("Error reading '{path}': {e}"),
+            }
+        }
+        "list_dir" => {
+            let path = input["path"].as_str().unwrap_or(".");
+            match std::fs::read_dir(path) {
+                Ok(entries) => {
+                    let mut lines: Vec<String> = entries
+                        .filter_map(|e| e.ok())
+                        .map(|e| {
+                            let name = e.file_name().to_string_lossy().into_owned();
+                            let kind = if e.path().is_dir() { "dir" } else { "file" };
+                            format!("[{kind}] {name}")
+                        })
+                        .collect();
+                    lines.sort();
+                    lines.join("\n")
+                }
+                Err(e) => format!("Error listing '{path}': {e}"),
+            }
+        }
+        "run_shell" => {
+            let cmd = input["command"].as_str().unwrap_or("");
+            match Command::new("sh").arg("-c").arg(cmd).output() {
+                Ok(out) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let status = out.status.code().unwrap_or(-1);
+                    let mut result = format!("exit code: {status}");
+                    if !stdout.is_empty() {
+                        result.push_str(&format!("\nstdout:\n{stdout}"));
+                    }
+                    if !stderr.is_empty() {
+                        result.push_str(&format!("\nstderr:\n{stderr}"));
+                    }
+                    result
+                }
+                Err(e) => format!("Error running command: {e}"),
+            }
+        }
         _ => format!("Unknown tool: {name}"),
     }
+}
+
+/// Convert days since Unix epoch to (year, month, day).
+fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    let mut year = 1970u64;
+    loop {
+        let leap = is_leap(year);
+        let days_in_year = if leap { 366 } else { 365 };
+        if days < days_in_year {
+            break;
+        }
+        days -= days_in_year;
+        year += 1;
+    }
+    let leap = is_leap(year);
+    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month = 1u64;
+    for &md in &month_days {
+        if days < md {
+            break;
+        }
+        days -= md;
+        month += 1;
+    }
+    (year, month, days + 1)
+}
+
+fn is_leap(y: u64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
 /// Simple recursive-descent math evaluator
@@ -190,7 +329,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "Rust AI Agent".bold().cyan());
     println!(
         "{}",
-        "Tools: calculate, get_weather (simulated)".dimmed()
+        "Tools: calculate, get_weather, current_time, read_file, list_dir, run_shell".dimmed()
     );
     println!("{}", "Type 'quit' to exit.\n".dimmed());
 

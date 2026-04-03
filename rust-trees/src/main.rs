@@ -31,4 +31,5 @@ fn main() {
     println!("  cargo run --example avl_usage");
     println!("  cargo run --example trie_usage");
     println!("  cargo run --example traversals");
+    println!("  cargo run --example segtree_usage");
 }

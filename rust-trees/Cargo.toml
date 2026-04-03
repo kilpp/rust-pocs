@@ -18,3 +18,7 @@ path = "examples/trie_usage.rs"
 [[example]]
 name = "traversals"
 path = "examples/traversals.rs"
+
+[[example]]
+name = "segtree_usage"
+path = "examples/segtree_usage.rs"

@@ -28,8 +28,8 @@ impl UIRenderer {
             .margin(1)
             .constraints(
                 [
-                    Constraint::Percentage(25), // Left panel
-                    Constraint::Percentage(75), // Central panel
+                    Constraint::Percentage(30), // Left panel
+                    Constraint::Percentage(70), // Central panel
                 ]
                 .as_ref(),
             )

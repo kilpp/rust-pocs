@@ -1,0 +1,23 @@
+[package]
+name = "rust-segment-tree"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "rust_segment_tree"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rust-segment-tree"
+path = "src/main.rs"
+
+[[bin]]
+name = "tui"
+path = "src/bin/tui.rs"
+
+[dependencies]
+ratatui = "0.30"
+crossterm = "0.29"
+
+[dev-dependencies]
+rand = "0.10"

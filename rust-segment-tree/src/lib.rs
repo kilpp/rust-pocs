@@ -12,12 +12,12 @@ impl SegmentTree {
         let n = arr.len();
         let mut tree = vec![0; 2 * n];
 
-        // Step 1: copy input values into the leaf range [n, 2n).
+        // Step 1: copy input values into the leaf range [..., arr]
         tree[n..].copy_from_slice(arr);
 
-        // Step 2: fill internal nodes bottom-up. Walking indices from
-        // n-1 down to 1 guarantees both children of `i` are already set
-        // by the time we compute `tree[i]`.
+
+        // Step 2: build the internal nodes by summing children
+        //Example i = 5 -> tree[5] = tree[10] + tree[11] = 5 + 6 = 11
         for i in (1..n).rev() {
             tree[i] = tree[2 * i] + tree[2 * i + 1];
         }
@@ -29,12 +29,13 @@ impl SegmentTree {
         self.n
     }
 
+    //just to show in the tui
     pub fn nodes(&self) -> &[i32] {
         &self.tree
     }
 
-    /// Same as [`update`] but also returns the heap indices of every node
-    /// that was rewritten (the leaf and its ancestors up to the root).
+
+    //just to show in the tui
     pub fn update_traced(&mut self, p: usize, value: i32) -> Vec<usize> {
         assert!(p < self.n, "index {p} out of bounds for length {}", self.n);
 
@@ -51,8 +52,7 @@ impl SegmentTree {
         path
     }
 
-    /// Same as [`query`] but also returns the heap indices of every subtree
-    /// whose value was added into the running sum.
+    //just to show in the tui
     pub fn query_traced(&self, l: usize, r: usize) -> (i32, Vec<usize>) {
         assert!(
             l <= r && r <= self.n,
@@ -81,13 +81,11 @@ impl SegmentTree {
         (sum, visited)
     }
 
-    /// Replaces the value at index `p` with `value` and refreshes all
-    /// ancestors so subsequent queries stay consistent.
+    /// Replaces the value at index p with value and refreshes all
     pub fn update(&mut self, p: usize, value: i32) {
         assert!(p < self.n, "index {p} out of bounds for length {}", self.n);
 
-        // Write the new leaf, then walk up to the root recomputing each
-        // ancestor as the sum of its two children.
+        
         let mut i = p + self.n;
         self.tree[i] = value;
         i >>= 1;
@@ -97,24 +95,6 @@ impl SegmentTree {
         }
     }
 
-    /// Soft-removes the leaf at index `p` by setting it to the additive
-    /// identity. Subsequent queries behave as if the element were absent.
-    pub fn remove(&mut self, p: usize) {
-        self.update(p, 0);
-    }
-
-    /// Sum on the half-open interval `[l, r)`.
-    ///
-    /// Two pointers climb the tree from the leaf level, picking up the
-    /// largest subtrees that fit fully inside `[l, r)`:
-    ///   - if `l` is a *right* child, its parent covers values left of
-    ///     the range, so we take `tree[l]` and move `l` past it before
-    ///     going up;
-    ///   - symmetrically, if `r` is a *right* child, its left sibling
-    ///     `tree[r-1]` is fully inside the range, so we take it and
-    ///     decrement `r`.
-    /// When `l` and `r` meet, every covered subtree has been counted
-    /// exactly once.
     pub fn query(&self, l: usize, r: usize) -> i32 {
         assert!(
             l <= r && r <= self.n,
@@ -180,21 +160,6 @@ mod tests {
         st.update(4, 10);
         assert_eq!(st.query(0, 5), 23);
         assert_eq!(st.query(1, 4), 3);
-    }
-
-    #[test]
-    fn remove_zeroes_leaf() {
-        let mut st = SegmentTree::new(&[1, 2, 3, 4, 5]);
-        st.remove(2);
-        assert_eq!(st.query(0, 5), 12);
-        assert_eq!(st.query(2, 3), 0);
-    }
-
-    #[test]
-    #[should_panic]
-    fn remove_out_of_bounds() {
-        let mut st = SegmentTree::new(&[1, 2, 3]);
-        st.remove(3);
     }
 
     #[test]

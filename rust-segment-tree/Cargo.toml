@@ -18,6 +18,11 @@ path = "src/bin/tui.rs"
 [dependencies]
 ratatui = "0.30"
 crossterm = "0.29"
+rand = "0.10"
+
+[[bin]]
+name = "dps-tracker"
+path = "src/bin/dps_tracker.rs"
 
 [dev-dependencies]
 rand = "0.10"

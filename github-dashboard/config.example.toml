@@ -1,0 +1,19 @@
+# github-dashboard configuration
+#
+# Copy this file to `config.toml` and fill in your details.
+# `config.toml` is gitignored so your token stays out of version control.
+
+# GitHub API base URL.
+#   Public GitHub:  https://api.github.com
+#   Enterprise:     https://your-host/api/v3
+base_url = "https://api.github.com"
+
+# Personal access token (classic or fine-grained) with repo read access.
+# If omitted here, the GITHUB_TOKEN environment variable is used instead.
+token = "ghp_replace_me"
+
+# GitHub usernames whose contributions are tracked.
+users = ["octocat"]
+
+# Size of the timeline window, in days (default 7). Can be overridden with --days.
+timeline_days = 7

@@ -73,25 +73,58 @@ async fn run<B: ratatui::backend::Backend>(
 
         terminal.draw(|frame| ui::draw(frame, &app))?;
 
-        if event::poll(Duration::from_millis(100))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => break,
-                KeyCode::Down | KeyCode::Char('j') => app.select_next(),
-                KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
-                KeyCode::Char('r') => {
-                    app.begin_loading();
-                    spawn_fetch(&tx, &client, config);
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+            {
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Down | KeyCode::Char('j') => app.select_next(),
+                    KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
+                    KeyCode::Left | KeyCode::Char('h') => app.select_pr_prev(),
+                    KeyCode::Right | KeyCode::Char('l') => app.select_pr_next(),
+                    KeyCode::Char('o') | KeyCode::Enter => {
+                        if let Some(url) = app.selected_pr_url() {
+                            let _ = open_url(&url);
+                        }
+                    }
+                    KeyCode::Tab | KeyCode::Char('u') => app.cycle_user(),
+                    KeyCode::Char('t') => app.cycle_sort(),
+                    KeyCode::Char('r') => {
+                        app.begin_loading();
+                        spawn_fetch(&tx, &client, config);
+                    }
+                    KeyCode::Char('s') => spawn_summary(&tx, &mut app),
+                    _ => {}
                 }
-                KeyCode::Char('s') => spawn_summary(&tx, &mut app),
-                _ => {}
             }
+        } else {
+            // Timed out with no input: advance the spinner animation.
+            app.tick = app.tick.wrapping_add(1);
         }
     }
 
     Ok(())
+}
+
+/// Open a URL in the system browser, detached and silent so it can't disturb
+/// the TUI. Best-effort: failures are ignored by the caller.
+fn open_url(url: &str) -> std::io::Result<()> {
+    use std::process::{Command, Stdio};
+
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(target_os = "windows")]
+    let program = "explorer";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let program = "xdg-open";
+
+    Command::new(program)
+        .arg(url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
 }
 
 fn spawn_fetch(tx: &UnboundedSender<AppEvent>, client: &Arc<Client>, config: &Config) {
@@ -108,10 +141,7 @@ fn spawn_fetch(tx: &UnboundedSender<AppEvent>, client: &Arc<Client>, config: &Co
         );
 
         let result = match (prs_res, contrib_res) {
-            (Ok(prs), Ok(contributions)) => Ok(DashboardData {
-                stats: lang::aggregate(prs),
-                contributions,
-            }),
+            (Ok(prs), Ok(contributions)) => Ok(DashboardData { prs, contributions }),
             (Err(e), _) | (_, Err(e)) => Err(e),
         };
         let _ = tx.send(AppEvent::FetchDone(result));

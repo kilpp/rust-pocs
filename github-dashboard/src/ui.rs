@@ -1,3 +1,4 @@
+use chrono::Local;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -6,7 +7,10 @@ use ratatui::widgets::{
     Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap,
 };
 
-use crate::app::{App, Status};
+use crate::app::{App, PR_LIST_LIMIT, Status};
+
+/// Braille frames for the loading spinner.
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let chunks = Layout::vertical([
@@ -23,7 +27,14 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let (status_text, status_color) = match &app.status {
-        Status::Loading => ("loading…".to_string(), Color::Yellow),
+        Status::Loading => {
+            let frame = SPINNER[(app.tick as usize) % SPINNER.len()];
+            let elapsed = app
+                .loading_since
+                .map(|t| (Local::now() - t).num_seconds().max(0))
+                .unwrap_or(0);
+            (format!("{frame} loading… {elapsed}s"), Color::Yellow)
+        }
         Status::Ready => {
             let refreshed = app
                 .last_refresh
@@ -31,9 +42,11 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
                 .unwrap_or_default();
             (
                 format!(
-                    "{} languages · {} PR contributions · refreshed {}",
+                    "{} languages · {} PR contributions · filter: {} · sort: {} · refreshed {}",
                     app.stats.len(),
                     app.total_prs(),
+                    app.filter_label(),
+                    app.sort_mode.label(),
                     refreshed
                 ),
                 Color::Green,
@@ -101,7 +114,8 @@ fn draw_contributions(frame: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .title(" Contributions ");
 
-    if app.contributions.is_empty() {
+    let visible = app.visible_contributions();
+    if visible.is_empty() {
         let msg = match &app.status {
             Status::Loading => "Fetching contributions…",
             Status::Error(_) => "Could not load contributions (see header).",
@@ -115,7 +129,7 @@ fn draw_contributions(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let mut lines: Vec<Line> = Vec::new();
-    for c in &app.contributions {
+    for c in visible {
         let mut headline = vec![
             Span::styled(
                 c.user.clone(),
@@ -249,11 +263,19 @@ fn draw_summary(frame: &mut Frame, app: &App, area: Rect) {
             )),
             Line::from(""),
         ];
-        for pr in lang.prs.iter().take(12) {
+        for (i, pr) in lang.prs.iter().take(PR_LIST_LIMIT).enumerate() {
             let marker = if pr.is_open() { "○" } else { "●" };
+            let selected = i == app.selected_pr;
+            let cursor = if selected { "▶ " } else { "  " };
+            let title_style = if selected {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
             lines.push(Line::from(vec![
+                Span::styled(cursor, Style::default().fg(Color::Cyan)),
                 Span::styled(format!("{marker} "), Style::default().fg(Color::DarkGray)),
-                Span::raw(pr.title.clone()),
+                Span::styled(pr.title.clone(), title_style),
                 Span::styled(
                     format!("  ({})", pr.repo),
                     Style::default().fg(Color::DarkGray),
@@ -262,7 +284,7 @@ fn draw_summary(frame: &mut Frame, app: &App, area: Rect) {
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "Press 's' to summarize these PRs with claude.",
+            "←/→ pick PR · o open in browser · s summarize with claude",
             Style::default().fg(Color::Cyan),
         )));
         lines
@@ -278,14 +300,24 @@ fn draw_summary(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect) {
+    let key = |k: &'static str| Span::styled(k, Style::default().fg(Color::Yellow).bold());
     let footer = Paragraph::new(Line::from(vec![
-        Span::styled(" ↑/↓", Style::default().fg(Color::Yellow).bold()),
-        Span::raw(" select  "),
-        Span::styled("s", Style::default().fg(Color::Yellow).bold()),
+        Span::raw(" "),
+        key("↑/↓"),
+        Span::raw(" lang  "),
+        key("←/→"),
+        Span::raw(" PR  "),
+        key("o"),
+        Span::raw(" open  "),
+        key("s"),
         Span::raw(" summarize  "),
-        Span::styled("r", Style::default().fg(Color::Yellow).bold()),
+        key("u"),
+        Span::raw(" user  "),
+        key("t"),
+        Span::raw(" sort  "),
+        key("r"),
         Span::raw(" refresh  "),
-        Span::styled("q", Style::default().fg(Color::Yellow).bold()),
+        key("q"),
         Span::raw(" quit"),
     ]));
     frame.render_widget(footer, area);

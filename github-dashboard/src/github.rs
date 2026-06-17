@@ -20,12 +20,28 @@ pub struct Pr {
     pub state: String,
     /// "owner/name".
     pub repo: String,
+    /// Configured users matched by the `involves:` search for this PR.
+    pub involved_users: Vec<String>,
 }
 
 impl Pr {
     pub fn is_open(&self) -> bool {
         self.state == "open"
     }
+}
+
+/// Build the browser URL for a PR, deriving the web host from the API base URL.
+/// Public:     https://api.github.com  -> https://github.com/owner/name/pull/N
+/// Enterprise: https://host/api/v3     -> https://host/owner/name/pull/N
+pub fn pr_web_url(base_url: &str, repo: &str, number: u64) -> String {
+    let host = if base_url == "https://api.github.com" {
+        "https://github.com".to_string()
+    } else if let Some(host) = base_url.strip_suffix("/api/v3") {
+        host.to_string()
+    } else {
+        base_url.to_string()
+    };
+    format!("{host}/{repo}/pull/{number}")
 }
 
 /// Build a reqwest client with the headers GitHub expects on every request.
@@ -88,7 +104,8 @@ pub async fn fetch_prs(
         .to_string();
 
     let mut prs: Vec<Pr> = Vec::new();
-    let mut seen_ids = std::collections::HashSet::new();
+    // PR id -> index into `prs`, so a PR involving several users is recorded once.
+    let mut id_to_index: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
 
     for user in users {
         let query = format!("involves:{user} type:pr created:>={since}");
@@ -120,14 +137,25 @@ pub async fn fetch_prs(
 
             let count = parsed.items.len();
             for item in parsed.items {
-                if seen_ids.insert(item.id) {
-                    prs.push(Pr {
-                        number: item.number,
-                        title: item.title,
-                        body: item.body.unwrap_or_default(),
-                        state: item.state,
-                        repo: repo_from_url(&item.repository_url),
-                    });
+                match id_to_index.get(&item.id) {
+                    Some(&idx) => {
+                        // Already seen via another user's search — note this user too.
+                        let involved = &mut prs[idx].involved_users;
+                        if !involved.iter().any(|u| u == user) {
+                            involved.push(user.clone());
+                        }
+                    }
+                    None => {
+                        id_to_index.insert(item.id, prs.len());
+                        prs.push(Pr {
+                            number: item.number,
+                            title: item.title,
+                            body: item.body.unwrap_or_default(),
+                            state: item.state,
+                            repo: repo_from_url(&item.repository_url),
+                            involved_users: vec![user.clone()],
+                        });
+                    }
                 }
             }
 

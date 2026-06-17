@@ -21,6 +21,10 @@ CLI what a given language's pull requests were about.
   (`involves:` search).
 - **AI summaries** — press `s` on a language to have the `claude` CLI explain
   what those PRs were about.
+- **Filter & sort** — `u`/`Tab` cycles the view through each configured user (or
+  all of them); `t` re-sorts the language table by total / open / closed / name.
+- **Jump to a PR** — pick a PR in the summary list with `←`/`→` and press `o` to
+  open it on GitHub (works against Enterprise hosts too).
 
 ## Setup
 
@@ -51,12 +55,17 @@ CLI what a given language's pull requests were about.
 
 ## Keys
 
-| Key        | Action                                  |
-|------------|-----------------------------------------|
-| `↑` / `k`  | Select previous language                |
-| `↓` / `j`  | Select next language                    |
-| `s`        | Summarize the selected language's PRs with `claude` |
-| `r`        | Refresh data                            |
-| `q` / `Esc`| Quit                                    |
+| Key          | Action                                  |
+|--------------|-----------------------------------------|
+| `↑` / `k`    | Select previous language                |
+| `↓` / `j`    | Select next language                    |
+| `←` / `h`    | Select previous PR in the summary list  |
+| `→` / `l`    | Select next PR in the summary list      |
+| `o` / `Enter`| Open the selected PR in your browser    |
+| `u` / `Tab`  | Cycle the user filter (all → each user) |
+| `t`          | Cycle the language sort (total / open / closed / name) |
+| `s`          | Summarize the selected language's PRs with `claude` |
+| `r`          | Refresh data                            |
+| `q` / `Esc`  | Quit                                    |
 
 The `s` feature shells out to the `claude` CLI, which must be on your `PATH`.

@@ -7,7 +7,7 @@ use ratatui::widgets::{
     Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap,
 };
 
-use crate::app::{App, PR_LIST_LIMIT, Status};
+use crate::app::{App, Status};
 
 /// Braille frames for the loading spinner.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -42,11 +42,10 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
                 .unwrap_or_default();
             (
                 format!(
-                    "{} languages · {} PR contributions · filter: {} · sort: {} · refreshed {}",
-                    app.stats.len(),
-                    app.total_prs(),
+                    "{} open · {} closed · filter: {} · refreshed {}",
+                    app.open_count(),
+                    app.closed_count(),
                     app.filter_label(),
-                    app.sort_mode.label(),
                     refreshed
                 ),
                 Color::Green,
@@ -84,14 +83,14 @@ fn draw_body(frame: &mut Frame, app: &App, area: Rect) {
     let cols = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
         .split(area);
 
-    // Left column: contributions on top, language breakdown below.
+    // Left column: contributions on top, the PR list below.
     let contrib_height = ((app.users.len() as u16) * 2 + 2).clamp(4, 14);
     let left = Layout::vertical([Constraint::Length(contrib_height), Constraint::Min(0)])
         .split(cols[0]);
 
     draw_contributions(frame, app, left[0]);
-    draw_languages(frame, app, left[1]);
-    draw_summary(frame, app, cols[1]);
+    draw_prs(frame, app, left[1]);
+    draw_pr_details(frame, app, cols[1]);
 }
 
 /// Render a compact unicode sparkline for a series of counts.
@@ -168,42 +167,42 @@ fn draw_contributions(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(para, area);
 }
 
-fn draw_languages(frame: &mut Frame, app: &App, area: Rect) {
-    if app.stats.is_empty() {
+fn draw_prs(frame: &mut Frame, app: &App, area: Rect) {
+    let title = format!(
+        " Pull requests — {} open · {} closed ",
+        app.open_count(),
+        app.closed_count()
+    );
+
+    if app.prs.is_empty() {
         let msg = match &app.status {
             Status::Loading => "Fetching pull requests…",
             Status::Error(_) => "Could not load data (see header).",
             Status::Ready => "No pull requests in this window.",
         };
         let placeholder = Paragraph::new(msg)
-            .block(Block::default().borders(Borders::ALL).title(" Languages "))
+            .block(Block::default().borders(Borders::ALL).title(title))
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(placeholder, area);
         return;
     }
 
-    let max_total = app.stats.iter().map(|s| s.total()).max().unwrap_or(1).max(1);
-
+    // PRs are ordered open-first then closed (see App::recompute); a colored
+    // state cell makes the two groups visually distinct.
     let rows: Vec<Row> = app
-        .stats
+        .prs
         .iter()
-        .map(|s| {
-            let bar_width = 12usize;
-            let filled = (s.total() * bar_width).div_ceil(max_total).min(bar_width);
-            let bar: String = "█".repeat(filled);
+        .map(|pr| {
+            let (marker, color) = if pr.is_open() {
+                ("● open", Color::Green)
+            } else {
+                ("● closed", Color::Magenta)
+            };
 
             Row::new(vec![
-                Cell::from(s.language.clone()),
-                Cell::from(Span::styled(
-                    s.prs_open.to_string(),
-                    Style::default().fg(Color::Green),
-                )),
-                Cell::from(Span::styled(
-                    s.prs_closed.to_string(),
-                    Style::default().fg(Color::Magenta),
-                )),
-                Cell::from(s.total().to_string()),
-                Cell::from(Span::styled(bar, Style::default().fg(Color::Cyan))),
+                Cell::from(Span::styled(marker, Style::default().fg(color))),
+                Cell::from(format!("#{}", pr.number)),
+                Cell::from(pr.title.clone()),
             ])
         })
         .collect();
@@ -211,18 +210,16 @@ fn draw_languages(frame: &mut Frame, app: &App, area: Rect) {
     let table = Table::new(
         rows,
         [
-            Constraint::Length(14),
-            Constraint::Length(6),
-            Constraint::Length(8),
-            Constraint::Length(6),
-            Constraint::Length(13),
+            Constraint::Length(9),
+            Constraint::Length(7),
+            Constraint::Min(0),
         ],
     )
     .header(
-        Row::new(vec!["Language", "Open", "Closed", "Total", ""])
+        Row::new(vec!["State", "#", "Title"])
             .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
     )
-    .block(Block::default().borders(Borders::ALL).title(" Languages "))
+    .block(Block::default().borders(Borders::ALL).title(title))
     .row_highlight_style(
         Style::default()
             .bg(Color::DarkGray)
@@ -235,10 +232,10 @@ fn draw_languages(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_stateful_widget(table, area, &mut state);
 }
 
-fn draw_summary(frame: &mut Frame, app: &App, area: Rect) {
-    let title = match app.selected_lang() {
-        Some(l) => format!(" What were the {} PRs about? ", l.language),
-        None => " Summary ".to_string(),
+fn draw_pr_details(frame: &mut Frame, app: &App, area: Rect) {
+    let title = match app.selected_pr() {
+        Some(pr) => format!(" PR #{} ", pr.number),
+        None => " Pull request ".to_string(),
     };
 
     let block = Block::default().borders(Borders::ALL).title(title);
@@ -248,49 +245,62 @@ fn draw_summary(frame: &mut Frame, app: &App, area: Rect) {
             "Summarizing with claude…",
             Style::default().fg(Color::Yellow),
         ))]
-    } else if let Some(text) = &app.summary {
-        text.lines().map(Line::from).collect()
-    } else if let Some(lang) = app.selected_lang() {
+    } else if let Some(pr) = app.selected_pr() {
+        let (state_text, state_color) = if pr.is_open() {
+            ("open", Color::Green)
+        } else {
+            ("closed", Color::Magenta)
+        };
+
         let mut lines = vec![
             Line::from(Span::styled(
-                format!(
-                    "{} PRs ({} open, {} closed)",
-                    lang.total(),
-                    lang.prs_open,
-                    lang.prs_closed
-                ),
-                Style::default().fg(Color::DarkGray),
+                pr.title.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
             )),
-            Line::from(""),
-        ];
-        for (i, pr) in lang.prs.iter().take(PR_LIST_LIMIT).enumerate() {
-            let marker = if pr.is_open() { "○" } else { "●" };
-            let selected = i == app.selected_pr;
-            let cursor = if selected { "▶ " } else { "  " };
-            let title_style = if selected {
-                Style::default().add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            lines.push(Line::from(vec![
-                Span::styled(cursor, Style::default().fg(Color::Cyan)),
-                Span::styled(format!("{marker} "), Style::default().fg(Color::DarkGray)),
-                Span::styled(pr.title.clone(), title_style),
+            Line::from(vec![
+                Span::styled(state_text, Style::default().fg(state_color)),
                 Span::styled(
-                    format!("  ({})", pr.repo),
+                    format!("  ·  {}  ·  #{}", pr.repo, pr.number),
                     Style::default().fg(Color::DarkGray),
                 ),
-            ]));
+            ]),
+        ];
+
+        if !pr.involved_users.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("involves: {}", pr.involved_users.join(", ")),
+                Style::default().fg(Color::DarkGray),
+            )));
         }
         lines.push(Line::from(""));
+
+        if let Some(text) = &app.summary {
+            lines.push(Line::from(Span::styled(
+                "claude summary",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )));
+            lines.extend(text.lines().map(Line::from));
+        } else {
+            let preview = pr.body.trim();
+            if preview.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "(no description)",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            } else {
+                lines.extend(preview.lines().map(Line::from));
+            }
+        }
+
+        lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "←/→ pick PR · o open in browser · s summarize with claude",
+            "o open in browser · s summarize with claude",
             Style::default().fg(Color::Cyan),
         )));
         lines
     } else {
         vec![Line::from(Span::styled(
-            "Select a language to see its PRs.",
+            "Select a pull request to see its details.",
             Style::default().fg(Color::DarkGray),
         ))]
     };
@@ -304,8 +314,6 @@ fn draw_footer(frame: &mut Frame, area: Rect) {
     let footer = Paragraph::new(Line::from(vec![
         Span::raw(" "),
         key("↑/↓"),
-        Span::raw(" lang  "),
-        key("←/→"),
         Span::raw(" PR  "),
         key("o"),
         Span::raw(" open  "),
@@ -313,8 +321,6 @@ fn draw_footer(frame: &mut Frame, area: Rect) {
         Span::raw(" summarize  "),
         key("u"),
         Span::raw(" user  "),
-        key("t"),
-        Span::raw(" sort  "),
         key("r"),
         Span::raw(" refresh  "),
         key("q"),

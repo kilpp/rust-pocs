@@ -1,41 +1,36 @@
 use crate::github::Pr;
 
-/// Max characters of each PR body included in the prompt, to keep it bounded.
-const BODY_PREVIEW_LEN: usize = 280;
+/// Max characters of the PR body included in the prompt, to keep it bounded.
+const BODY_PREVIEW_LEN: usize = 1200;
 
-fn build_prompt(language: &str, prs: &[Pr]) -> String {
+fn build_prompt(pr: &Pr) -> String {
+    let state = if pr.is_open() { "open" } else { "closed" };
+    let body: String = pr.body.trim().chars().take(BODY_PREVIEW_LEN).collect();
+
     let mut prompt = format!(
-        "You are summarizing recent GitHub pull request activity for the language \"{language}\".\n\
-         Below are the pull requests. In 3-6 sentences, explain what this work was about \
-         overall — the themes, features, fixes, or areas touched. Be concrete and concise.\n\n\
-         Pull requests:\n"
+        "You are summarizing a single GitHub pull request.\n\
+         In 2-4 sentences, explain what this pull request does — the change, its purpose, \
+         and the area it touches. Be concrete and concise.\n\n\
+         Title: {}\n\
+         Repository: {}\n\
+         State: {state}\n\
+         Number: #{}\n",
+        pr.title.trim(),
+        pr.repo,
+        pr.number,
     );
 
-    for pr in prs {
-        let body: String = pr.body.trim().chars().take(BODY_PREVIEW_LEN).collect();
-        let state = if pr.is_open() { "open" } else { "closed" };
-        prompt.push_str(&format!(
-            "- [{state}] {} (#{} in {})\n",
-            pr.title.trim(),
-            pr.number,
-            pr.repo
-        ));
-        if !body.is_empty() {
-            prompt.push_str(&format!("    {}\n", body.replace('\n', " ")));
-        }
+    if !body.is_empty() {
+        prompt.push_str(&format!("\nDescription:\n{}\n", body.replace('\n', " ")));
     }
 
     prompt
 }
 
-/// Ask the local `claude` CLI to explain what a language's PRs were about.
+/// Ask the local `claude` CLI to explain what a single PR is about.
 /// Returns the CLI's stdout, or an error string suitable for display.
-pub async fn summarize(language: &str, prs: &[Pr]) -> Result<String, String> {
-    if prs.is_empty() {
-        return Err("no pull requests to summarize".to_string());
-    }
-
-    let prompt = build_prompt(language, prs);
+pub async fn summarize(pr: &Pr) -> Result<String, String> {
+    let prompt = build_prompt(pr);
 
     let output = tokio::process::Command::new("claude")
         .arg("-p")

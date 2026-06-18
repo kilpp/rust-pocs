@@ -1,13 +1,8 @@
-use std::sync::Arc;
-
 use chrono::{Duration, Utc};
 use reqwest::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use serde::Deserialize;
-use tokio::sync::Semaphore;
 
-/// Maximum number of file-listing requests in flight at once.
-const MAX_CONCURRENT_FILE_FETCHES: usize = 8;
 /// Safety cap on pagination so a huge account can't loop forever.
 const MAX_PAGES: u32 = 10;
 
@@ -167,84 +162,6 @@ pub async fn fetch_prs(
     }
 
     Ok(prs)
-}
-
-// --- PR files -----------------------------------------------------------------
-
-#[derive(Deserialize)]
-struct PrFile {
-    filename: String,
-}
-
-/// Fetch the list of changed filenames for a single PR.
-async fn fetch_pr_files(client: &Client, base_url: &str, pr: &Pr) -> Result<Vec<String>, String> {
-    let mut files = Vec::new();
-    let mut page = 1u32;
-
-    loop {
-        let url = format!("{base_url}/repos/{}/pulls/{}/files", pr.repo, pr.number);
-        let resp = client
-            .get(&url)
-            .query(&[("per_page", "100"), ("page", &page.to_string())])
-            .send()
-            .await
-            .map_err(|e| format!("files request failed for {}#{}: {e}", pr.repo, pr.number))?;
-
-        if !resp.status().is_success() {
-            // A single inaccessible PR shouldn't sink the whole dashboard.
-            return Ok(files);
-        }
-
-        let parsed: Vec<PrFile> = resp.json().await.unwrap_or_default();
-        let count = parsed.len();
-        files.extend(parsed.into_iter().map(|f| f.filename));
-
-        if count < 100 || page >= MAX_PAGES {
-            break;
-        }
-        page += 1;
-    }
-
-    Ok(files)
-}
-
-/// High-level fetch: find the PRs, then fetch each PR's changed files
-/// concurrently (bounded). Returns each PR paired with its filenames.
-pub async fn fetch_prs_with_files(
-    client: &Client,
-    base_url: &str,
-    users: &[String],
-    days: u32,
-) -> Result<Vec<(Pr, Vec<String>)>, String> {
-    let prs = fetch_prs(client, base_url, users, days).await?;
-
-    let client = Arc::new(client.clone());
-    let base_url = Arc::new(base_url.to_string());
-    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_FILE_FETCHES));
-    let mut set = tokio::task::JoinSet::new();
-
-    for pr in prs {
-        let client = Arc::clone(&client);
-        let base_url = Arc::clone(&base_url);
-        let semaphore = Arc::clone(&semaphore);
-        set.spawn(async move {
-            let _permit = semaphore.acquire().await.expect("semaphore not closed");
-            let files = fetch_pr_files(&client, &base_url, &pr)
-                .await
-                .unwrap_or_default();
-            (pr, files)
-        });
-    }
-
-    let mut results = Vec::new();
-    while let Some(joined) = set.join_next().await {
-        match joined {
-            Ok(pair) => results.push(pair),
-            Err(e) => return Err(format!("file fetch task failed: {e}")),
-        }
-    }
-
-    Ok(results)
 }
 
 // --- Contributions (GraphQL) --------------------------------------------------

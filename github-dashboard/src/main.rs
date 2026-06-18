@@ -2,7 +2,6 @@ mod app;
 mod claude;
 mod config;
 mod github;
-mod lang;
 mod ui;
 
 use std::io;
@@ -81,15 +80,12 @@ async fn run<B: ratatui::backend::Backend>(
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     KeyCode::Down | KeyCode::Char('j') => app.select_next(),
                     KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
-                    KeyCode::Left | KeyCode::Char('h') => app.select_pr_prev(),
-                    KeyCode::Right | KeyCode::Char('l') => app.select_pr_next(),
                     KeyCode::Char('o') | KeyCode::Enter => {
                         if let Some(url) = app.selected_pr_url() {
                             let _ = open_url(&url);
                         }
                     }
                     KeyCode::Tab | KeyCode::Char('u') => app.cycle_user(),
-                    KeyCode::Char('t') => app.cycle_sort(),
                     KeyCode::Char('r') => {
                         app.begin_loading();
                         spawn_fetch(&tx, &client, config);
@@ -136,7 +132,7 @@ fn spawn_fetch(tx: &UnboundedSender<AppEvent>, client: &Arc<Client>, config: &Co
 
     tokio::spawn(async move {
         let (prs_res, contrib_res) = tokio::join!(
-            github::fetch_prs_with_files(&client, &base_url, &users, days),
+            github::fetch_prs(&client, &base_url, &users, days),
             github::fetch_contributions(&client, &base_url, &users, days),
         );
 
@@ -152,18 +148,18 @@ fn spawn_summary(tx: &UnboundedSender<AppEvent>, app: &mut App) {
     if app.summarizing {
         return;
     }
-    let Some(lang) = app.selected_lang() else {
+    let Some(pr) = app.selected_pr() else {
         return;
     };
 
-    let language = lang.language.clone();
-    let prs = lang.prs.clone();
+    let pr = pr.clone();
+    let key = format!("{}#{}", pr.repo, pr.number);
     app.summarizing = true;
     app.summary = None;
 
     let tx = tx.clone();
     tokio::spawn(async move {
-        let result = claude::summarize(&language, &prs).await;
-        let _ = tx.send(AppEvent::SummaryDone { language, result });
+        let result = claude::summarize(&pr).await;
+        let _ = tx.send(AppEvent::SummaryDone { key, result });
     });
 }

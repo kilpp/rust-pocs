@@ -6,22 +6,66 @@ use serde::Deserialize;
 /// Safety cap on pagination so a huge account can't loop forever.
 const MAX_PAGES: u32 = 10;
 
+/// Aggregate review decision on a PR, mirroring GitHub's `reviewDecision`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewState {
+    Approved,
+    ChangesRequested,
+    ReviewRequired,
+    /// No decision yet, or reviews not required on this PR.
+    None,
+}
+
+/// Rolled-up status of the latest commit's checks (CI), mirroring
+/// GitHub's `statusCheckRollup.state`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CiState {
+    Success,
+    Failure,
+    Pending,
+    /// No checks configured / reported.
+    None,
+}
+
 #[derive(Debug, Clone)]
 pub struct Pr {
     pub number: u64,
     pub title: String,
     pub body: String,
-    /// "open" or "closed".
+    /// "open", "closed", or "merged".
     pub state: String,
     /// "owner/name".
     pub repo: String,
     /// Configured users matched by the `involves:` search for this PR.
     pub involved_users: Vec<String>,
+    /// Whether the PR is still a draft.
+    pub is_draft: bool,
+    pub review: ReviewState,
+    pub ci: CiState,
+    pub additions: u64,
+    pub deletions: u64,
+    /// Logins a review is currently requested from (pending reviewers).
+    pub review_requested_from: Vec<String>,
 }
 
 impl Pr {
     pub fn is_open(&self) -> bool {
         self.state == "open"
+    }
+
+    pub fn is_merged(&self) -> bool {
+        self.state == "merged"
+    }
+
+    /// True when this PR is open, ready (not a draft), and awaiting a review
+    /// from one of the given users — i.e. the ball is in their court.
+    pub fn waiting_on(&self, users: &[String]) -> bool {
+        self.is_open()
+            && !self.is_draft
+            && self
+                .review_requested_from
+                .iter()
+                .any(|r| users.iter().any(|u| u.eq_ignore_ascii_case(r)))
     }
 }
 
@@ -58,106 +102,247 @@ pub fn build_client(token: &str) -> Result<Client, String> {
         .map_err(|e| format!("failed to build HTTP client: {e}"))
 }
 
-// --- Search API ---------------------------------------------------------------
+// --- PR search (GraphQL) ------------------------------------------------------
+
+/// GraphQL `search` over issues, restricted to PRs. Returns the rich per-PR
+/// fields (review decision, draft, CI rollup, diff size, pending reviewers)
+/// that the REST search endpoint does not expose.
+const PR_SEARCH_QUERY: &str = r#"
+query($q:String!,$cursor:String){
+  search(query:$q, type:ISSUE, first:100, after:$cursor){
+    pageInfo{ hasNextPage endCursor }
+    nodes{
+      ... on PullRequest {
+        number
+        title
+        body
+        state
+        isDraft
+        reviewDecision
+        additions
+        deletions
+        repository{ nameWithOwner }
+        reviewRequests(first:25){
+          nodes{ requestedReviewer{ ... on User { login } } }
+        }
+        commits(last:1){
+          nodes{ commit{ statusCheckRollup{ state } } }
+        }
+      }
+    }
+  }
+}"#;
 
 #[derive(Deserialize)]
-struct SearchResponse {
-    items: Vec<SearchItem>,
+struct PrSearchResponse {
+    data: Option<PrSearchData>,
+    errors: Option<Vec<GqlError>>,
 }
 
 #[derive(Deserialize)]
-struct SearchItem {
-    id: u64,
+struct PrSearchData {
+    search: SearchConn,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchConn {
+    page_info: PageInfo,
+    nodes: Vec<PrNode>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PageInfo {
+    has_next_page: bool,
+    end_cursor: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct PrNode {
     number: u64,
-    #[serde(default)]
     title: String,
-    #[serde(default)]
     body: Option<String>,
     state: String,
-    repository_url: String,
+    is_draft: bool,
+    review_decision: Option<String>,
+    additions: u64,
+    deletions: u64,
+    repository: RepoRef,
+    review_requests: ReviewRequests,
+    commits: CommitsConn,
 }
 
-fn repo_from_url(repository_url: &str) -> String {
-    // .../repos/owner/name  ->  owner/name
-    repository_url
-        .rsplit("/repos/")
-        .next()
-        .unwrap_or(repository_url)
-        .to_string()
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct RepoRef {
+    name_with_owner: String,
+}
+
+#[derive(Deserialize, Default)]
+struct ReviewRequests {
+    nodes: Vec<ReviewRequestNode>,
+}
+
+#[derive(Deserialize, Default)]
+struct ReviewRequestNode {
+    #[serde(rename = "requestedReviewer")]
+    reviewer: Option<Reviewer>,
+}
+
+#[derive(Deserialize, Default)]
+struct Reviewer {
+    /// Absent for team reviewers (only `... on User` is selected).
+    login: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct CommitsConn {
+    nodes: Vec<CommitNode>,
+}
+
+#[derive(Deserialize, Default)]
+struct CommitNode {
+    commit: CommitInner,
+}
+
+#[derive(Deserialize, Default)]
+struct CommitInner {
+    #[serde(rename = "statusCheckRollup")]
+    rollup: Option<StatusRollup>,
+}
+
+#[derive(Deserialize, Default)]
+struct StatusRollup {
+    state: String,
+}
+
+fn map_review(decision: Option<&str>) -> ReviewState {
+    match decision {
+        Some("APPROVED") => ReviewState::Approved,
+        Some("CHANGES_REQUESTED") => ReviewState::ChangesRequested,
+        Some("REVIEW_REQUIRED") => ReviewState::ReviewRequired,
+        _ => ReviewState::None,
+    }
+}
+
+fn map_ci(state: Option<&str>) -> CiState {
+    match state {
+        Some("SUCCESS") => CiState::Success,
+        Some("FAILURE") | Some("ERROR") => CiState::Failure,
+        Some("PENDING") | Some("EXPECTED") => CiState::Pending,
+        _ => CiState::None,
+    }
 }
 
 /// Search for PRs that each user authored or was involved in, since `days` ago.
-/// Results are de-duplicated by PR id (involves: overlaps between users).
+/// Results are de-duplicated by repo+number (involves: overlaps between users).
 pub async fn fetch_prs(
     client: &Client,
     base_url: &str,
     users: &[String],
     days: u32,
 ) -> Result<Vec<Pr>, String> {
+    let url = graphql_url(base_url);
     let since = (Utc::now() - Duration::days(days as i64))
         .format("%Y-%m-%d")
         .to_string();
 
     let mut prs: Vec<Pr> = Vec::new();
-    // PR id -> index into `prs`, so a PR involving several users is recorded once.
-    let mut id_to_index: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    // repo#number -> index into `prs`, so a PR involving several users is
+    // recorded once with all involved users accumulated.
+    let mut key_to_index: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
 
     for user in users {
         let query = format!("involves:{user} type:pr created:>={since}");
-        let mut page = 1u32;
+        let mut cursor: Option<String> = None;
+        let mut page = 0u32;
 
         loop {
-            let url = format!("{base_url}/search/issues");
+            let body = serde_json::json!({
+                "query": PR_SEARCH_QUERY,
+                "variables": { "q": query, "cursor": cursor },
+            });
+
             let resp = client
-                .get(&url)
-                .query(&[
-                    ("q", query.as_str()),
-                    ("per_page", "100"),
-                    ("page", &page.to_string()),
-                ])
+                .post(&url)
+                .json(&body)
                 .send()
                 .await
                 .map_err(|e| format!("search request failed for {user}: {e}"))?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                return Err(format!("search for {user} returned {status}: {body}"));
+                let text = resp.text().await.unwrap_or_default();
+                return Err(format!("search for {user} returned {status}: {text}"));
             }
 
-            let parsed: SearchResponse = resp
+            let parsed: PrSearchResponse = resp
                 .json()
                 .await
                 .map_err(|e| format!("could not parse search response for {user}: {e}"))?;
 
-            let count = parsed.items.len();
-            for item in parsed.items {
-                match id_to_index.get(&item.id) {
-                    Some(&idx) => {
-                        // Already seen via another user's search — note this user too.
-                        let involved = &mut prs[idx].involved_users;
-                        if !involved.iter().any(|u| u == user) {
-                            involved.push(user.clone());
-                        }
-                    }
-                    None => {
-                        id_to_index.insert(item.id, prs.len());
-                        prs.push(Pr {
-                            number: item.number,
-                            title: item.title,
-                            body: item.body.unwrap_or_default(),
-                            state: item.state,
-                            repo: repo_from_url(&item.repository_url),
-                            involved_users: vec![user.clone()],
-                        });
-                    }
-                }
+            if let Some(errors) = parsed.errors
+                && let Some(first) = errors.first()
+            {
+                return Err(format!("GraphQL search error for {user}: {}", first.message));
             }
 
-            if count < 100 || page >= MAX_PAGES {
+            let Some(data) = parsed.data else { break };
+
+            for node in data.search.nodes {
+                // Non-PR nodes deserialize empty; `type:pr` should exclude them.
+                if node.number == 0 {
+                    continue;
+                }
+                let key = format!("{}#{}", node.repository.name_with_owner, node.number);
+                if let Some(&idx) = key_to_index.get(&key) {
+                    // Already seen via another user's search — note this user too.
+                    let involved = &mut prs[idx].involved_users;
+                    if !involved.iter().any(|u| u == user) {
+                        involved.push(user.clone());
+                    }
+                    continue;
+                }
+
+                let requested = node
+                    .review_requests
+                    .nodes
+                    .into_iter()
+                    .filter_map(|n| n.reviewer.and_then(|r| r.login))
+                    .collect();
+                let ci = map_ci(
+                    node.commits
+                        .nodes
+                        .first()
+                        .and_then(|c| c.commit.rollup.as_ref())
+                        .map(|r| r.state.as_str()),
+                );
+
+                key_to_index.insert(key, prs.len());
+                prs.push(Pr {
+                    number: node.number,
+                    title: node.title,
+                    body: node.body.unwrap_or_default(),
+                    state: node.state.to_lowercase(),
+                    repo: node.repository.name_with_owner,
+                    involved_users: vec![user.clone()],
+                    is_draft: node.is_draft,
+                    review: map_review(node.review_decision.as_deref()),
+                    ci,
+                    additions: node.additions,
+                    deletions: node.deletions,
+                    review_requested_from: requested,
+                });
+            }
+
+            page += 1;
+            if !data.search.page_info.has_next_page || page >= MAX_PAGES {
                 break;
             }
-            page += 1;
+            cursor = data.search.page_info.end_cursor;
         }
     }
 

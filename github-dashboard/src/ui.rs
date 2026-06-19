@@ -8,6 +8,7 @@ use ratatui::widgets::{
 };
 
 use crate::app::{App, Status};
+use crate::github::{CiState, Pr, ReviewState};
 
 /// Braille frames for the loading spinner.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -42,9 +43,10 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
                 .unwrap_or_default();
             (
                 format!(
-                    "{} open · {} closed · filter: {} · refreshed {}",
+                    "{} open · {} closed · {} waiting · filter: {} · refreshed {}",
                     app.open_count(),
                     app.closed_count(),
+                    app.waiting_count(),
                     app.filter_label(),
                     refreshed
                 ),
@@ -167,17 +169,92 @@ fn draw_contributions(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(para, area);
 }
 
+/// Colored state marker for a PR (open / draft / merged / closed).
+fn state_marker(pr: &Pr) -> (&'static str, Color) {
+    if pr.is_draft {
+        ("◌ draft", Color::DarkGray)
+    } else if pr.is_open() {
+        ("● open", Color::Green)
+    } else if pr.is_merged() {
+        ("⬤ merged", Color::Magenta)
+    } else {
+        ("● closed", Color::Red)
+    }
+}
+
+/// Review-decision glyph + color, or `None` when there's nothing to show.
+fn review_badge(review: ReviewState) -> Option<(&'static str, Color)> {
+    match review {
+        ReviewState::Approved => Some(("✓", Color::Green)),
+        ReviewState::ChangesRequested => Some(("✗", Color::Red)),
+        ReviewState::ReviewRequired => Some(("◷", Color::Yellow)),
+        ReviewState::None => None,
+    }
+}
+
+/// CI rollup dot + color, or `None` when no checks are reported.
+fn ci_badge(ci: CiState) -> Option<(&'static str, Color)> {
+    match ci {
+        CiState::Success => Some(("●", Color::Green)),
+        CiState::Failure => Some(("●", Color::Red)),
+        CiState::Pending => Some(("●", Color::Yellow)),
+        CiState::None => None,
+    }
+}
+
+/// Worded review status for the details pane.
+fn review_text(review: ReviewState) -> Span<'static> {
+    let (text, color) = match review {
+        ReviewState::Approved => ("approved", Color::Green),
+        ReviewState::ChangesRequested => ("changes requested", Color::Red),
+        ReviewState::ReviewRequired => ("review required", Color::Yellow),
+        ReviewState::None => ("—", Color::DarkGray),
+    };
+    Span::styled(text, Style::default().fg(color))
+}
+
+/// Worded CI status for the details pane.
+fn ci_text(ci: CiState) -> Span<'static> {
+    let (text, color) = match ci {
+        CiState::Success => ("passing", Color::Green),
+        CiState::Failure => ("failing", Color::Red),
+        CiState::Pending => ("pending", Color::Yellow),
+        CiState::None => ("—", Color::DarkGray),
+    };
+    Span::styled(text, Style::default().fg(color))
+}
+
+/// Compact `<review> <ci>` cell for the PR list.
+fn checks_spans(pr: &Pr) -> Line<'static> {
+    let mut spans = Vec::new();
+    if let Some((glyph, color)) = review_badge(pr.review) {
+        spans.push(Span::styled(glyph, Style::default().fg(color)));
+    }
+    if let Some((glyph, color)) = ci_badge(pr.ci) {
+        if !spans.is_empty() {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(glyph, Style::default().fg(color)));
+    }
+    Line::from(spans)
+}
+
 fn draw_prs(frame: &mut Frame, app: &App, area: Rect) {
-    let title = format!(
-        " Pull requests — {} open · {} closed ",
-        app.open_count(),
-        app.closed_count()
-    );
+    let title = if app.waiting_only {
+        format!(" Review queue — {} waiting on you ", app.prs.len())
+    } else {
+        format!(
+            " Pull requests — {} open · {} closed ",
+            app.open_count(),
+            app.closed_count()
+        )
+    };
 
     if app.prs.is_empty() {
         let msg = match &app.status {
             Status::Loading => "Fetching pull requests…",
             Status::Error(_) => "Could not load data (see header).",
+            Status::Ready if app.waiting_only => "Nothing awaiting your review. 🎉",
             Status::Ready => "No pull requests in this window.",
         };
         let placeholder = Paragraph::new(msg)
@@ -193,15 +270,12 @@ fn draw_prs(frame: &mut Frame, app: &App, area: Rect) {
         .prs
         .iter()
         .map(|pr| {
-            let (marker, color) = if pr.is_open() {
-                ("● open", Color::Green)
-            } else {
-                ("● closed", Color::Magenta)
-            };
+            let (marker, color) = state_marker(pr);
 
             Row::new(vec![
                 Cell::from(Span::styled(marker, Style::default().fg(color))),
                 Cell::from(format!("#{}", pr.number)),
+                Cell::from(checks_spans(pr)),
                 Cell::from(pr.title.clone()),
             ])
         })
@@ -212,11 +286,12 @@ fn draw_prs(frame: &mut Frame, app: &App, area: Rect) {
         [
             Constraint::Length(9),
             Constraint::Length(7),
+            Constraint::Length(4),
             Constraint::Min(0),
         ],
     )
     .header(
-        Row::new(vec!["State", "#", "Title"])
+        Row::new(vec!["State", "#", "CI", "Title"])
             .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
     )
     .block(Block::default().borders(Borders::ALL).title(title))
@@ -246,10 +321,14 @@ fn draw_pr_details(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::Yellow),
         ))]
     } else if let Some(pr) = app.selected_pr() {
-        let (state_text, state_color) = if pr.is_open() {
+        let (state_word, state_color) = if pr.is_draft {
+            ("draft", Color::DarkGray)
+        } else if pr.is_open() {
             ("open", Color::Green)
+        } else if pr.is_merged() {
+            ("merged", Color::Magenta)
         } else {
-            ("closed", Color::Magenta)
+            ("closed", Color::Red)
         };
 
         let mut lines = vec![
@@ -258,13 +337,45 @@ fn draw_pr_details(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().add_modifier(Modifier::BOLD),
             )),
             Line::from(vec![
-                Span::styled(state_text, Style::default().fg(state_color)),
+                Span::styled(state_word, Style::default().fg(state_color)),
                 Span::styled(
                     format!("  ·  {}  ·  #{}", pr.repo, pr.number),
                     Style::default().fg(Color::DarkGray),
                 ),
             ]),
         ];
+
+        // Review / CI / diff-size status line.
+        let mut status = vec![
+            Span::styled("review: ", Style::default().fg(Color::DarkGray)),
+            review_text(pr.review),
+            Span::styled("   ci: ", Style::default().fg(Color::DarkGray)),
+            ci_text(pr.ci),
+            Span::styled("   ", Style::default()),
+            Span::styled(
+                format!("+{}", pr.additions),
+                Style::default().fg(Color::Green),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("-{}", pr.deletions),
+                Style::default().fg(Color::Red),
+            ),
+        ];
+        if pr.waiting_on(&app.users) {
+            status.push(Span::styled(
+                "   ⮜ waiting on you",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ));
+        }
+        lines.push(Line::from(status));
+
+        if !pr.review_requested_from.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("review requested: {}", pr.review_requested_from.join(", ")),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
 
         if !pr.involved_users.is_empty() {
             lines.push(Line::from(Span::styled(
@@ -321,6 +432,8 @@ fn draw_footer(frame: &mut Frame, area: Rect) {
         Span::raw(" summarize  "),
         key("u"),
         Span::raw(" user  "),
+        key("w"),
+        Span::raw(" waiting  "),
         key("r"),
         Span::raw(" refresh  "),
         key("q"),

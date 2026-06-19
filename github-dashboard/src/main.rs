@@ -86,6 +86,7 @@ async fn run<B: ratatui::backend::Backend>(
                         }
                     }
                     KeyCode::Tab | KeyCode::Char('u') => app.cycle_user(),
+                    KeyCode::Char('w') => app.toggle_waiting(),
                     KeyCode::Char('r') => {
                         app.begin_loading();
                         spawn_fetch(&tx, &client, config);

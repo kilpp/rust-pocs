@@ -48,6 +48,9 @@ pub struct App {
     pub selected: usize,
     /// Index into `users` to filter by, or `None` for all users.
     pub user_filter: Option<usize>,
+    /// When set, show only open, ready PRs awaiting a review from a configured
+    /// user (the "waiting on you" review queue).
+    pub waiting_only: bool,
     pub status: Status,
     pub last_refresh: Option<DateTime<Local>>,
     /// When the in-flight fetch started, for the elapsed-time indicator.
@@ -71,6 +74,7 @@ impl App {
             contributions: Vec::new(),
             selected: 0,
             user_filter: None,
+            waiting_only: false,
             status: Status::Loading,
             last_refresh: None,
             loading_since: Some(Local::now()),
@@ -115,10 +119,28 @@ impl App {
         self.prs.len() - self.open_count()
     }
 
-    /// Rebuild `prs` from `all_prs`, applying the user filter and the
-    /// open-first ordering (most recent PR number first within each group).
+    /// Users the "waiting on you" filter checks against: the single filtered
+    /// user when one is selected, otherwise every configured user.
+    fn waiting_users(&self) -> Vec<String> {
+        match self.filter_user() {
+            Some(user) => vec![user.to_string()],
+            None => self.users.clone(),
+        }
+    }
+
+    /// How many PRs (across all users, ignoring the waiting filter itself) are
+    /// awaiting a review from a configured user. Drives the header badge.
+    pub fn waiting_count(&self) -> usize {
+        let users = self.waiting_users();
+        self.all_prs.iter().filter(|p| p.waiting_on(&users)).count()
+    }
+
+    /// Rebuild `prs` from `all_prs`, applying the user filter, the optional
+    /// "waiting on you" filter, and the open-first ordering (most recent PR
+    /// number first within each group).
     fn recompute(&mut self) {
         let filter = self.filter_user().map(str::to_string);
+        let waiting_users = self.waiting_users();
         let mut filtered: Vec<Pr> = self
             .all_prs
             .iter()
@@ -126,6 +148,7 @@ impl App {
                 Some(user) => pr.involved_users.iter().any(|u| u == user),
                 None => true,
             })
+            .filter(|pr| !self.waiting_only || pr.waiting_on(&waiting_users))
             .cloned()
             .collect();
 
@@ -137,6 +160,13 @@ impl App {
         if self.selected >= self.prs.len() {
             self.selected = 0;
         }
+    }
+
+    /// Toggle the "waiting on you" review-queue filter.
+    pub fn toggle_waiting(&mut self) {
+        self.waiting_only = !self.waiting_only;
+        self.recompute();
+        self.on_selection_change();
     }
 
     pub fn cycle_user(&mut self) {

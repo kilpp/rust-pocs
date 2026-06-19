@@ -14,15 +14,23 @@ timeline, with a list of the pull requests in the window — and can ask the loc
   as the profile graph), broken down into commits / PRs / reviews / issues with
   a daily sparkline, via the GraphQL `contributionsCollection` API.
 - **Pull request list** — every PR in the window, grouped open-first then
-  closed, with its state, number, and title. Note this is PR-based: if your
-  activity is mostly direct commits, this panel will be sparse while the
-  Contributions panel shows the real totals.
+  closed, with its state (open / draft / merged / closed), number, and title.
+  Note this is PR-based: if your activity is mostly direct commits, this panel
+  will be sparse while the Contributions panel shows the real totals.
+- **Review & CI badges** — each PR shows its aggregate review decision
+  (`✓` approved, `✗` changes requested, `◷` review required) and a CI rollup
+  dot (green passing / red failing / yellow pending). The details pane adds the
+  worded status, diff size (`+/-`), and the pending reviewers.
+- **"Waiting on you" review queue** — press `w` to filter to the open, ready
+  PRs that are awaiting a review from one of your configured users. The header
+  always shows the waiting count so you can see the backlog at a glance.
 - **PR scope** — lists PRs each user authored *or was involved in*
-  (`involves:` search).
+  (`involves:` search), fetched via GraphQL so the review/CI metadata comes
+  back in the same request.
 - **AI summaries** — press `s` on a PR to have the `claude` CLI explain what
   that pull request is about.
 - **Filter** — `u`/`Tab` cycles the view through each configured user (or all of
-  them).
+  them); combine it with `w` to scope the review queue to a single user.
 - **Jump to a PR** — select a PR with `↑`/`↓` and press `o` to open it on GitHub
   (works against Enterprise hosts too).
 
@@ -61,6 +69,7 @@ timeline, with a list of the pull requests in the window — and can ask the loc
 | `↓` / `j`    | Select next pull request                |
 | `o` / `Enter`| Open the selected PR in your browser    |
 | `u` / `Tab`  | Cycle the user filter (all → each user) |
+| `w`          | Toggle the "waiting on you" review queue |
 | `s`          | Summarize the selected PR with `claude` |
 | `r`          | Refresh data                            |
 | `q` / `Esc`  | Quit                                    |

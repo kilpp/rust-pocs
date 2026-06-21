@@ -154,7 +154,7 @@ fn spawn_summary(tx: &UnboundedSender<AppEvent>, app: &mut App) {
     };
 
     let pr = pr.clone();
-    let key = format!("{}#{}", pr.repo, pr.number);
+    let key = pr.key();
     app.summarizing = true;
     app.summary = None;
 

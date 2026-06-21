@@ -49,6 +49,12 @@ pub struct Pr {
 }
 
 impl Pr {
+    /// Stable identity for a PR (`owner/name#number`), used to match async
+    /// results back to the PR they were requested for.
+    pub fn key(&self) -> String {
+        format!("{}#{}", self.repo, self.number)
+    }
+
     pub fn is_open(&self) -> bool {
         self.state == "open"
     }
@@ -236,8 +242,67 @@ fn map_ci(state: Option<&str>) -> CiState {
     }
 }
 
+/// Paginate the `involves:` PR search for a single user, returning the raw
+/// nodes. Pagination is inherently sequential (each page needs the previous
+/// page's cursor), but different users run concurrently — see [`fetch_prs`].
+async fn fetch_user_pr_nodes(
+    client: &Client,
+    url: &str,
+    user: &str,
+    since: &str,
+) -> Result<Vec<PrNode>, String> {
+    let query = format!("involves:{user} type:pr created:>={since}");
+    let mut cursor: Option<String> = None;
+    let mut page = 0u32;
+    let mut nodes: Vec<PrNode> = Vec::new();
+
+    loop {
+        let body = serde_json::json!({
+            "query": PR_SEARCH_QUERY,
+            "variables": { "q": query, "cursor": cursor },
+        });
+
+        let resp = client
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("search request failed for {user}: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("search for {user} returned {status}: {text}"));
+        }
+
+        let parsed: PrSearchResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("could not parse search response for {user}: {e}"))?;
+
+        if let Some(errors) = parsed.errors
+            && let Some(first) = errors.first()
+        {
+            return Err(format!("GraphQL search error for {user}: {}", first.message));
+        }
+
+        let Some(data) = parsed.data else { break };
+        nodes.extend(data.search.nodes);
+
+        page += 1;
+        if !data.search.page_info.has_next_page || page >= MAX_PAGES {
+            break;
+        }
+        cursor = data.search.page_info.end_cursor;
+    }
+
+    Ok(nodes)
+}
+
 /// Search for PRs that each user authored or was involved in, since `days` ago.
-/// Results are de-duplicated by repo+number (involves: overlaps between users).
+/// Each user's search runs concurrently; results are de-duplicated by
+/// repo+number (involves: overlaps between users), preserving the order in
+/// which PRs are first seen when walking `users` in order.
 pub async fn fetch_prs(
     client: &Client,
     base_url: &str,
@@ -249,100 +314,64 @@ pub async fn fetch_prs(
         .format("%Y-%m-%d")
         .to_string();
 
+    let per_user = futures::future::join_all(
+        users
+            .iter()
+            .map(|user| fetch_user_pr_nodes(client, &url, user, &since)),
+    )
+    .await;
+
     let mut prs: Vec<Pr> = Vec::new();
     // repo#number -> index into `prs`, so a PR involving several users is
     // recorded once with all involved users accumulated.
     let mut key_to_index: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
 
-    for user in users {
-        let query = format!("involves:{user} type:pr created:>={since}");
-        let mut cursor: Option<String> = None;
-        let mut page = 0u32;
-
-        loop {
-            let body = serde_json::json!({
-                "query": PR_SEARCH_QUERY,
-                "variables": { "q": query, "cursor": cursor },
-            });
-
-            let resp = client
-                .post(&url)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| format!("search request failed for {user}: {e}"))?;
-
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let text = resp.text().await.unwrap_or_default();
-                return Err(format!("search for {user} returned {status}: {text}"));
+    for (user, nodes) in users.iter().zip(per_user) {
+        for node in nodes? {
+            // Non-PR nodes deserialize empty; `type:pr` should exclude them.
+            if node.number == 0 {
+                continue;
+            }
+            let key = format!("{}#{}", node.repository.name_with_owner, node.number);
+            if let Some(&idx) = key_to_index.get(&key) {
+                // Already seen via another user's search — note this user too.
+                let involved = &mut prs[idx].involved_users;
+                if !involved.iter().any(|u| u == user) {
+                    involved.push(user.clone());
+                }
+                continue;
             }
 
-            let parsed: PrSearchResponse = resp
-                .json()
-                .await
-                .map_err(|e| format!("could not parse search response for {user}: {e}"))?;
-
-            if let Some(errors) = parsed.errors
-                && let Some(first) = errors.first()
-            {
-                return Err(format!("GraphQL search error for {user}: {}", first.message));
-            }
-
-            let Some(data) = parsed.data else { break };
-
-            for node in data.search.nodes {
-                // Non-PR nodes deserialize empty; `type:pr` should exclude them.
-                if node.number == 0 {
-                    continue;
-                }
-                let key = format!("{}#{}", node.repository.name_with_owner, node.number);
-                if let Some(&idx) = key_to_index.get(&key) {
-                    // Already seen via another user's search — note this user too.
-                    let involved = &mut prs[idx].involved_users;
-                    if !involved.iter().any(|u| u == user) {
-                        involved.push(user.clone());
-                    }
-                    continue;
-                }
-
-                let requested = node
-                    .review_requests
+            let requested = node
+                .review_requests
+                .nodes
+                .into_iter()
+                .filter_map(|n| n.reviewer.and_then(|r| r.login))
+                .collect();
+            let ci = map_ci(
+                node.commits
                     .nodes
-                    .into_iter()
-                    .filter_map(|n| n.reviewer.and_then(|r| r.login))
-                    .collect();
-                let ci = map_ci(
-                    node.commits
-                        .nodes
-                        .first()
-                        .and_then(|c| c.commit.rollup.as_ref())
-                        .map(|r| r.state.as_str()),
-                );
+                    .first()
+                    .and_then(|c| c.commit.rollup.as_ref())
+                    .map(|r| r.state.as_str()),
+            );
 
-                key_to_index.insert(key, prs.len());
-                prs.push(Pr {
-                    number: node.number,
-                    title: node.title,
-                    body: node.body.unwrap_or_default(),
-                    state: node.state.to_lowercase(),
-                    repo: node.repository.name_with_owner,
-                    involved_users: vec![user.clone()],
-                    is_draft: node.is_draft,
-                    review: map_review(node.review_decision.as_deref()),
-                    ci,
-                    additions: node.additions,
-                    deletions: node.deletions,
-                    review_requested_from: requested,
-                });
-            }
-
-            page += 1;
-            if !data.search.page_info.has_next_page || page >= MAX_PAGES {
-                break;
-            }
-            cursor = data.search.page_info.end_cursor;
+            key_to_index.insert(key, prs.len());
+            prs.push(Pr {
+                number: node.number,
+                title: node.title,
+                body: node.body.unwrap_or_default(),
+                state: node.state.to_lowercase(),
+                repo: node.repository.name_with_owner,
+                involved_users: vec![user.clone()],
+                is_draft: node.is_draft,
+                review: map_review(node.review_decision.as_deref()),
+                ci,
+                additions: node.additions,
+                deletions: node.deletions,
+                review_requested_from: requested,
+            });
         }
     }
 
@@ -448,7 +477,82 @@ struct Day {
     contribution_count: u64,
 }
 
+/// Fetch GitHub contribution totals for a single user over the window.
+/// An unknown/inaccessible user yields zeros rather than an error, so one bad
+/// login doesn't blank the whole panel.
+async fn fetch_user_contributions(
+    client: &Client,
+    url: &str,
+    user: &str,
+    from_s: &str,
+    to_s: &str,
+    since_date: &str,
+) -> Result<Contributions, String> {
+    let body = serde_json::json!({
+        "query": CONTRIB_QUERY,
+        "variables": { "login": user, "from": from_s, "to": to_s },
+    });
+
+    let resp = client
+        .post(url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("contributions request failed for {user}: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("contributions for {user} returned {status}: {text}"));
+    }
+
+    let parsed: GqlResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("could not parse contributions for {user}: {e}"))?;
+
+    if let Some(errors) = parsed.errors
+        && let Some(first) = errors.first()
+    {
+        return Err(format!("GraphQL error for {user}: {}", first.message));
+    }
+
+    let Some(cc) = parsed.data.and_then(|d| d.user).map(|u| u.cc) else {
+        return Ok(Contributions {
+            user: user.to_string(),
+            commits: 0,
+            prs: 0,
+            reviews: 0,
+            issues: 0,
+            private: 0,
+            total: 0,
+            daily: Vec::new(),
+        });
+    };
+
+    let daily: Vec<u64> = cc
+        .contribution_calendar
+        .weeks
+        .iter()
+        .flat_map(|w| w.days.iter())
+        .filter(|d| d.date.as_str() >= since_date)
+        .map(|d| d.contribution_count)
+        .collect();
+
+    Ok(Contributions {
+        user: user.to_string(),
+        commits: cc.total_commit_contributions,
+        prs: cc.total_pull_request_contributions,
+        reviews: cc.total_pull_request_review_contributions,
+        issues: cc.total_issue_contributions,
+        private: cc.restricted_contributions_count,
+        total: cc.contribution_calendar.total_contributions,
+        daily,
+    })
+}
+
 /// Fetch GitHub contribution totals for each user over the last `days`.
+/// Each user's request runs concurrently; output preserves `users` order.
 pub async fn fetch_contributions(
     client: &Client,
     base_url: &str,
@@ -462,73 +566,105 @@ pub async fn fetch_contributions(
     let to_s = to.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let since_date = from.format("%Y-%m-%d").to_string();
 
-    let mut out = Vec::with_capacity(users.len());
+    let results = futures::future::join_all(users.iter().map(|user| {
+        fetch_user_contributions(client, &url, user, &from_s, &to_s, &since_date)
+    }))
+    .await;
 
-    for user in users {
-        let body = serde_json::json!({
-            "query": CONTRIB_QUERY,
-            "variables": { "login": user, "from": from_s, "to": to_s },
-        });
+    results.into_iter().collect()
+}
 
-        let resp = client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("contributions request failed for {user}: {e}"))?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(format!("contributions for {user} returned {status}: {text}"));
+    /// Minimal PR builder for tests; fields not under test get neutral defaults.
+    fn pr(state: &str, is_draft: bool, requested: &[&str]) -> Pr {
+        Pr {
+            number: 7,
+            title: "t".into(),
+            body: String::new(),
+            state: state.into(),
+            repo: "owner/name".into(),
+            involved_users: Vec::new(),
+            is_draft,
+            review: ReviewState::None,
+            ci: CiState::None,
+            additions: 0,
+            deletions: 0,
+            review_requested_from: requested.iter().map(|s| s.to_string()).collect(),
         }
-
-        let parsed: GqlResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("could not parse contributions for {user}: {e}"))?;
-
-        if let Some(errors) = parsed.errors
-            && let Some(first) = errors.first()
-        {
-            return Err(format!("GraphQL error for {user}: {}", first.message));
-        }
-
-        let Some(cc) = parsed.data.and_then(|d| d.user).map(|u| u.cc) else {
-            // Unknown user or no access — show zeros rather than failing everything.
-            out.push(Contributions {
-                user: user.clone(),
-                commits: 0,
-                prs: 0,
-                reviews: 0,
-                issues: 0,
-                private: 0,
-                total: 0,
-                daily: Vec::new(),
-            });
-            continue;
-        };
-
-        let daily: Vec<u64> = cc
-            .contribution_calendar
-            .weeks
-            .iter()
-            .flat_map(|w| w.days.iter())
-            .filter(|d| d.date.as_str() >= since_date.as_str())
-            .map(|d| d.contribution_count)
-            .collect();
-
-        out.push(Contributions {
-            user: user.clone(),
-            commits: cc.total_commit_contributions,
-            prs: cc.total_pull_request_contributions,
-            reviews: cc.total_pull_request_review_contributions,
-            issues: cc.total_issue_contributions,
-            private: cc.restricted_contributions_count,
-            total: cc.contribution_calendar.total_contributions,
-            daily,
-        });
     }
 
-    Ok(out)
+    #[test]
+    fn pr_key_is_repo_and_number() {
+        assert_eq!(pr("open", false, &[]).key(), "owner/name#7");
+    }
+
+    #[test]
+    fn waiting_on_open_requested_user_case_insensitive() {
+        let users = vec!["Alice".to_string()];
+        // Open, not draft, alice is a requested reviewer (login casing differs).
+        assert!(pr("open", false, &["alice"]).waiting_on(&users));
+    }
+
+    #[test]
+    fn waiting_on_excludes_drafts_closed_and_unrequested() {
+        let users = vec!["alice".to_string()];
+        assert!(!pr("open", true, &["alice"]).waiting_on(&users)); // draft
+        assert!(!pr("closed", false, &["alice"]).waiting_on(&users)); // closed
+        assert!(!pr("open", false, &["bob"]).waiting_on(&users)); // not requested
+        assert!(!pr("open", false, &[]).waiting_on(&users)); // no reviewers
+    }
+
+    #[test]
+    fn pr_web_url_public_enterprise_and_fallback() {
+        assert_eq!(
+            pr_web_url("https://api.github.com", "owner/name", 5),
+            "https://github.com/owner/name/pull/5"
+        );
+        assert_eq!(
+            pr_web_url("https://ghe.corp/api/v3", "owner/name", 5),
+            "https://ghe.corp/owner/name/pull/5"
+        );
+        // Unexpected base: fall back to using it verbatim as the host.
+        assert_eq!(
+            pr_web_url("https://example.test", "owner/name", 5),
+            "https://example.test/owner/name/pull/5"
+        );
+    }
+
+    #[test]
+    fn graphql_url_public_and_enterprise() {
+        assert_eq!(
+            graphql_url("https://api.github.com"),
+            "https://api.github.com/graphql"
+        );
+        assert_eq!(
+            graphql_url("https://ghe.corp/api/v3"),
+            "https://ghe.corp/api/graphql"
+        );
+    }
+
+    #[test]
+    fn map_review_known_and_unknown() {
+        assert_eq!(map_review(Some("APPROVED")), ReviewState::Approved);
+        assert_eq!(
+            map_review(Some("CHANGES_REQUESTED")),
+            ReviewState::ChangesRequested
+        );
+        assert_eq!(map_review(Some("REVIEW_REQUIRED")), ReviewState::ReviewRequired);
+        assert_eq!(map_review(None), ReviewState::None);
+        assert_eq!(map_review(Some("SOMETHING_ELSE")), ReviewState::None);
+    }
+
+    #[test]
+    fn map_ci_groups_states() {
+        assert_eq!(map_ci(Some("SUCCESS")), CiState::Success);
+        assert_eq!(map_ci(Some("FAILURE")), CiState::Failure);
+        assert_eq!(map_ci(Some("ERROR")), CiState::Failure);
+        assert_eq!(map_ci(Some("PENDING")), CiState::Pending);
+        assert_eq!(map_ci(Some("EXPECTED")), CiState::Pending);
+        assert_eq!(map_ci(None), CiState::None);
+    }
 }

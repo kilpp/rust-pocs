@@ -420,6 +420,36 @@ fn draw_pr_details(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(para, area);
 }
 
+#[cfg(test)]
+mod tests {
+    use super::sparkline;
+
+    #[test]
+    fn sparkline_empty_is_blank() {
+        assert_eq!(sparkline(&[]), "");
+    }
+
+    #[test]
+    fn sparkline_all_zero_is_baseline() {
+        // No activity: a flat row of the lowest bar, one per day.
+        assert_eq!(sparkline(&[0, 0, 0]), "▁▁▁");
+    }
+
+    #[test]
+    fn sparkline_scales_to_max_and_preserves_length() {
+        let bars = sparkline(&[0, 1, 4]);
+        assert_eq!(bars.chars().count(), 3);
+        // 0 -> lowest bar, max value -> highest bar.
+        assert_eq!(bars.chars().next(), Some('▁'));
+        assert_eq!(bars.chars().last(), Some('█'));
+    }
+
+    #[test]
+    fn sparkline_single_nonzero_is_full_bar() {
+        assert_eq!(sparkline(&[5]), "█");
+    }
+}
+
 fn draw_footer(frame: &mut Frame, area: Rect) {
     let key = |k: &'static str| Span::styled(k, Style::default().fg(Color::Yellow).bold());
     let footer = Paragraph::new(Line::from(vec![

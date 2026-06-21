@@ -28,12 +28,6 @@ pub enum AppEvent {
     },
 }
 
-/// Stable identity for a PR, used to discard summaries for a PR the user has
-/// navigated away from.
-fn pr_key(pr: &Pr) -> String {
-    format!("{}#{}", pr.repo, pr.number)
-}
-
 pub struct App {
     pub users: Vec<String>,
     pub base_url: String,
@@ -232,7 +226,7 @@ impl App {
             }
             AppEvent::SummaryDone { key, result } => {
                 // Ignore results for a PR the user has navigated away from.
-                if self.selected_pr().map(pr_key) != Some(key) {
+                if self.selected_pr().map(Pr::key) != Some(key) {
                     return;
                 }
                 self.summarizing = false;
